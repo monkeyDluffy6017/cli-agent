@@ -12,6 +12,8 @@
   "agents": {
     "cs": {
       "command": "cs",
+      "windowsNativePackage": "@costrict/cs",
+      "windowsNativeBinary": "cs.exe",
       "invocation": "shell",
       "promptMode": "argument",
       "newArgs": ["run", "--dir", "{workspace}", "--format", "json"],

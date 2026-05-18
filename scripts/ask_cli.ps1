@@ -97,6 +97,15 @@ function Write-File-NoBOM {
     [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
 }
 
+function Ensure-ParentDirectory {
+    param([string]$Path)
+    $dir = Split-Path $Path -Parent
+    if ([string]::IsNullOrWhiteSpace($dir)) { return }
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
 function Get-PropertyValue {
     param([object]$Object, [string]$Name)
     if (-not $Object) { return $null }
@@ -205,6 +214,86 @@ function Test-ConfiguredCommand {
     }
     Write-Error "[ERROR] Missing configured command: $Command"
     exit 1
+}
+
+function Test-IsWindowsRuntime {
+    if ($PSVersionTable.PSVersion.Major -le 5) { return $true }
+    $isWindowsValue = Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue
+    return [bool]$isWindowsValue
+}
+
+function Resolve-NpmNativeBinary {
+    param(
+        [string]$Command,
+        [string]$PackageName,
+        [string]$BinaryName
+    )
+
+    if (-not (Test-IsWindowsRuntime)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($PackageName) -or [string]::IsNullOrWhiteSpace($BinaryName)) {
+        return $null
+    }
+
+    $commandPaths = @()
+    try {
+        $commandInfo = Get-Command $Command -ErrorAction SilentlyContinue
+        if ($commandInfo) {
+            foreach ($propName in @('Source', 'Path', 'Definition')) {
+                $value = Get-PropertyValue -Object $commandInfo -Name $propName
+                if (-not [string]::IsNullOrWhiteSpace($value) -and (Test-Path $value -PathType Leaf)) {
+                    $commandPaths += (Resolve-Path $value).Path
+                }
+            }
+        }
+    } catch {}
+
+    if ((Test-Path $Command -PathType Leaf) -and -not ($commandPaths -contains (Resolve-Path $Command).Path)) {
+        $commandPaths += (Resolve-Path $Command).Path
+    }
+
+    $packageRelativePath = $PackageName -replace '[\\/]', [System.IO.Path]::DirectorySeparatorChar
+    foreach ($commandPath in ($commandPaths | Select-Object -Unique)) {
+        $shimDir = Split-Path $commandPath -Parent
+        $packageRoot = Join-Path (Join-Path $shimDir 'node_modules') $packageRelativePath
+        if (-not (Test-Path $packageRoot -PathType Container)) { continue }
+
+        $searchRoots = @()
+        $nestedModules = Join-Path $packageRoot 'node_modules'
+        if (Test-Path $nestedModules -PathType Container) { $searchRoots += $nestedModules }
+        $searchRoots += $packageRoot
+
+        foreach ($searchRoot in $searchRoots) {
+            $candidates = @(Get-ChildItem -LiteralPath $searchRoot -Recurse -Filter $BinaryName -File -ErrorAction SilentlyContinue | Where-Object {
+                (Split-Path $_.DirectoryName -Leaf) -eq 'bin'
+            })
+            if ($candidates.Count -eq 0) { continue }
+
+            $preferred = $candidates | Sort-Object `
+                @{ Expression = { if ($_.FullName -match 'windows.*baseline') { 0 } elseif ($_.FullName -match 'windows') { 1 } else { 2 } } }, `
+                FullName | Select-Object -First 1
+            if ($preferred) { return $preferred.FullName }
+        }
+    }
+
+    return $null
+}
+
+function Add-ProcessArgumentList {
+    param(
+        [System.Diagnostics.ProcessStartInfo]$ProcessStartInfo,
+        [string[]]$Arguments
+    )
+
+    try {
+        $argumentList = $ProcessStartInfo.ArgumentList
+        if ($null -eq $argumentList) { return $false }
+        foreach ($arg in $Arguments) {
+            $argumentList.Add([string]$arg) | Out-Null
+        }
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Get-CodexJsonSummary {
@@ -590,6 +679,18 @@ $vars = @{
 $command = Expand-Template -Text ([string](Get-PropertyValue -Object $agentConfig -Name 'command')) -Vars $vars
 Test-ConfiguredCommand $command
 
+$invocation = [string](Get-PropertyValue -Object $agentConfig -Name 'invocation')
+if ([string]::IsNullOrWhiteSpace($invocation)) { $invocation = 'direct' }
+
+$windowsNativePackage = [string](Get-PropertyValue -Object $agentConfig -Name 'windowsNativePackage')
+$windowsNativeBinary = [string](Get-PropertyValue -Object $agentConfig -Name 'windowsNativeBinary')
+$nativeCommand = Resolve-NpmNativeBinary -Command $command -PackageName $windowsNativePackage -BinaryName $windowsNativeBinary
+if (-not [string]::IsNullOrWhiteSpace($nativeCommand)) {
+    $command = $nativeCommand
+    $invocation = 'direct'
+    Write-Verbose "Resolved Windows native command: $command"
+}
+
 $isResumeMode = -not [string]::IsNullOrEmpty($Session)
 if ($isResumeMode) {
     $rawArgs = Get-PropertyValue -Object $agentConfig -Name 'resumeArgs'
@@ -636,9 +737,6 @@ if ([string]::IsNullOrWhiteSpace($outputMode)) { $outputMode = 'text' }
 $progressPrefix = [string](Get-PropertyValue -Object $agentConfig -Name 'progressPrefix')
 if ([string]::IsNullOrWhiteSpace($progressPrefix)) { $progressPrefix = "[$Agent]" }
 
-$invocation = [string](Get-PropertyValue -Object $agentConfig -Name 'invocation')
-if ([string]::IsNullOrWhiteSpace($invocation)) { $invocation = 'direct' }
-
 $stderrOutput = New-Object System.Text.StringBuilder
 $stdoutOutput = New-Object System.Text.StringBuilder
 
@@ -662,10 +760,12 @@ try {
         }
     } else {
         $psi.FileName = $command
-        $psi.Arguments = if ($isWindowsRuntime) {
-            ($childArgs | ForEach-Object { Quote-WindowsArg $_ }) -join ' '
-        } else {
-            ($childArgs | ForEach-Object { Quote-PosixArg $_ }) -join ' '
+        if (-not (Add-ProcessArgumentList -ProcessStartInfo $psi -Arguments $childArgs)) {
+            $psi.Arguments = if ($isWindowsRuntime) {
+                ($childArgs | ForEach-Object { Quote-WindowsArg $_ }) -join ' '
+            } else {
+                ($childArgs | ForEach-Object { Quote-PosixArg $_ }) -join ' '
+            }
         }
     }
 
@@ -774,18 +874,33 @@ try {
         $process.WaitForExit()
         $exitCode = $process.ExitCode
     } finally {
+        try { $process.CancelOutputRead() } catch {}
+        try { $process.CancelErrorRead() } catch {}
         Unregister-Event -SourceIdentifier $stdOutEvent.Name -ErrorAction SilentlyContinue
         Unregister-Event -SourceIdentifier $stdErrEvent.Name -ErrorAction SilentlyContinue
+        Remove-Job -Id $stdOutEvent.Id -Force -ErrorAction SilentlyContinue
+        Remove-Job -Id $stdErrEvent.Id -Force -ErrorAction SilentlyContinue
         $process.Dispose()
     }
 
     $stdoutText = $stdoutOutput.ToString()
     $stderrText = $stderrOutput.ToString()
-    $hasValidOutput = -not [string]::IsNullOrWhiteSpace($stdoutText)
 
-    if ($exitCode -ne 0 -and -not $hasValidOutput) {
-        Write-Error "[ERROR] Agent '$Agent' exited with code $exitCode"
-        if (-not [string]::IsNullOrWhiteSpace($stderrText)) { Write-Error $stderrText }
+    if ($exitCode -ne 0) {
+        $failureContent = @()
+        if (-not [string]::IsNullOrWhiteSpace($stdoutText)) {
+            $failureContent += "STDOUT:`n$($stdoutText.TrimEnd())"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+            $failureContent += "STDERR:`n$($stderrText.TrimEnd())"
+        }
+        if ($failureContent.Count -eq 0) {
+            $failureContent += "(no output from $Agent)"
+        }
+
+        Ensure-ParentDirectory -Path $Output
+        Write-File-NoBOM -Path $Output -Content ($failureContent -join "`n`n")
+        Write-Error "[ERROR] Agent '$Agent' exited with code $exitCode. Captured output: $Output"
         exit 1
     }
 
@@ -828,10 +943,7 @@ try {
         Save-SessionId -Path $sessionStatePath -Key $sessionKey -Agent $Agent -Workspace $Workspace -SessionId $threadId
     }
 
-    $outputDir = Split-Path $Output -Parent
-    if (-not (Test-Path $outputDir)) {
-        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-    }
+    Ensure-ParentDirectory -Path $Output
 
     if ($outputContent.Count -gt 0) {
         Write-File-NoBOM -Path $Output -Content ($outputContent -join "`n")

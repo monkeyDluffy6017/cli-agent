@@ -109,6 +109,8 @@ Each agent entry supports:
 | Field | Description |
 |-------|-------------|
 | `command` | Executable name or absolute path |
+| `windowsNativePackage` | Optional npm package to scan for a Windows native binary |
+| `windowsNativeBinary` | Native binary filename used with `windowsNativePackage` |
 | `invocation` | `direct` or `shell` |
 | `promptMode` | `stdin`, `argument`, or `file` |
 | `newArgs` | Arguments for a new session |
