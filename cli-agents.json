@@ -1,0 +1,83 @@
+{
+  "defaultAgent": "cs",
+  "runtimeDir": ".runtime",
+  "aliases": {
+    "cs": "cs",
+    "csc": "csc",
+    "claude": "claude-code",
+    "claude code": "claude-code",
+    "claude-code": "claude-code",
+    "codex": "codex"
+  },
+  "agents": {
+    "cs": {
+      "command": "cs",
+      "invocation": "shell",
+      "promptMode": "argument",
+      "newArgs": ["run", "--dir", "{workspace}", "--format", "json"],
+      "resumeArgs": ["run", "--dir", "{workspace}", "--session", "{session}", "--format", "json"],
+      "promptArgs": ["{prompt}"],
+      "modelArgs": ["--model", "{model}"],
+      "outputMode": "generic-json",
+      "progressPrefix": "[cs]",
+      "workingDirectory": "{workspace}",
+      "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
+    },
+    "claude-code": {
+      "command": "claude",
+      "invocation": "direct",
+      "promptMode": "argument",
+      "newArgs": ["-p", "--output-format", "json"],
+      "resumeArgs": ["--resume", "{session}", "-p", "--output-format", "json"],
+      "promptArgs": ["{prompt}"],
+      "modelArgs": ["--model", "{model}"],
+      "outputMode": "generic-json",
+      "progressPrefix": "[claude-code]",
+      "workingDirectory": "{workspace}",
+      "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
+    },
+    "csc": {
+      "command": "csc",
+      "invocation": "shell",
+      "promptMode": "argument",
+      "newArgs": ["-p", "--output-format", "json"],
+      "resumeArgs": ["--resume", "{session}", "-p", "--output-format", "json"],
+      "promptArgs": ["{prompt}"],
+      "modelArgs": ["--model", "{model}"],
+      "outputMode": "generic-json",
+      "progressPrefix": "[csc]",
+      "workingDirectory": "{workspace}",
+      "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
+    },
+    "codex": {
+      "command": "codex",
+      "invocation": "shell",
+      "promptMode": "stdin",
+      "outputMode": "codex-json",
+      "progressPrefix": "[codex]",
+      "workingDirectory": "{workspace}",
+      "newArgs": [
+        "exec",
+        "--cd",
+        "{workspace}",
+        "--skip-git-repo-check",
+        "--json",
+        "-c",
+        "model_reasoning_effort=\"{reasoning}\""
+      ],
+      "resumeArgs": [
+        "exec",
+        "resume",
+        "--skip-git-repo-check",
+        "--json",
+        "-c",
+        "model_reasoning_effort=\"{reasoning}\"",
+        "{session}",
+        "-"
+      ],
+      "modelArgs": ["-m", "{model}"],
+      "readOnlyArgs": ["--sandbox", "read-only"],
+      "sandboxArgs": ["--sandbox", "{sandbox}"]
+    }
+  }
+}
