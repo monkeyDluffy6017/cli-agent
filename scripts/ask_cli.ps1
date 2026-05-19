@@ -42,8 +42,30 @@ param(
     [Alias('o')]
     [string]$Output,
 
-    [switch]$Help
+    [switch]$Help,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingArgs
 )
+
+# Allow repeated -File / -f / --file flags (bash-style). PowerShell's named
+# parameter binder rejects "-File a -File b" even for [string[]] params, so we
+# sweep up any extra tokens here and merge them into $File.
+if ($RemainingArgs) {
+    $collected = New-Object System.Collections.Generic.List[string]
+    if ($File) { foreach ($f in $File) { $collected.Add([string]$f) | Out-Null } }
+    for ($i = 0; $i -lt $RemainingArgs.Count; $i++) {
+        $tok = [string]$RemainingArgs[$i]
+        if (($tok -eq '-File' -or $tok -eq '-f' -or $tok -eq '--file') -and ($i + 1) -lt $RemainingArgs.Count) {
+            $collected.Add([string]$RemainingArgs[$i + 1]) | Out-Null
+            $i++
+            continue
+        }
+        Write-Error "[ERROR] Unrecognized argument: $tok"
+        exit 1
+    }
+    $File = $collected.ToArray()
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -62,7 +84,8 @@ Agent selection:
   -Config, -c <path>           JSON config path (default: ../cli-agents.json)
 
 File context:
-  -File, -f <path>             Priority file path (repeatable)
+  -File, -f <paths>            Priority files. Comma-separated (-File a,b) or
+                               repeated flags (-File a -File b) both work.
 
 Multi-turn:
   -Session <id>                Resume a previous session, if the agent config supports it
