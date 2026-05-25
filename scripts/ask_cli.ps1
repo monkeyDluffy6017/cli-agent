@@ -2,11 +2,17 @@
 # Windows PowerShell 5.1+ compatible generic CLI-agent bridge.
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)]
+    [Parameter(Position = 0, ValueFromPipeline = $true)]
     [string]$Task,
 
     [Alias('t')]
     [string]$TaskText,
+
+    # Read prompt body from a UTF-8 file. Preferred on Windows when the prompt
+    # contains non-ASCII text, because callers can write the file with known
+    # encoding and avoid any stdin/pipeline encoding surprises.
+    [Alias('pf')]
+    [string]$PromptFile,
 
     [Alias('a')]
     [string]$Agent,
@@ -78,6 +84,10 @@ Usage:
 Task input:
   <task>                       First positional argument is the task text
   -Task, -t <text>             Alias for positional task
+  -PromptFile, -pf <path>      Read prompt body from a UTF-8 file (recommended
+                               on Windows for non-ASCII prompts; avoids stdin
+                               and pipeline encoding pitfalls)
+  <task> can also be piped in: Get-Content prompt.txt -Raw | ask_cli.ps1 -a codex
 
 Agent selection:
   -Agent, -a <name>            Configured child CLI name or alias (default: config.defaultAgent)
@@ -582,6 +592,19 @@ if ([string]::IsNullOrEmpty($Task) -and -not [string]::IsNullOrEmpty($TaskText))
     $Task = $TaskText
 }
 
+if ([string]::IsNullOrEmpty($Task) -and -not [string]::IsNullOrWhiteSpace($PromptFile)) {
+    if (-not (Test-Path $PromptFile -PathType Leaf)) {
+        Write-Error "[ERROR] PromptFile does not exist: $PromptFile"
+        exit 1
+    }
+    try {
+        $Task = [System.IO.File]::ReadAllText((Resolve-Path $PromptFile).Path, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        Write-Error "[ERROR] Failed to read PromptFile '$PromptFile' as UTF-8: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
 if ($NewSession -and $NoSession) {
     Write-Error "[ERROR] -NewSession and -NoSession cannot be used together."
     exit 1
@@ -635,7 +658,7 @@ $Workspace = (Resolve-Path $Workspace).Path
 
 $Task = Trim-Whitespace $Task
 if ([string]::IsNullOrEmpty($Task)) {
-    Write-Error "[ERROR] Request text is empty. Pass a positional arg or -Task."
+    Write-Error "[ERROR] Request text is empty. Pass a positional arg, -Task, -PromptFile, or pipe text in."
     exit 1
 }
 
@@ -802,6 +825,10 @@ try {
     $psi.CreateNoWindow = $true
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    # Force stdin to UTF-8 (no BOM). Without this, .NET defaults to the system
+    # code page on Windows (e.g. GBK on zh-CN), and non-ASCII prompts arrive at
+    # the child CLI as mojibake / invalid UTF-8.
+    try { $psi.StandardInputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
@@ -890,7 +917,13 @@ try {
         $process.BeginErrorReadLine()
 
         if ($promptMode -eq 'stdin') {
-            $process.StandardInput.Write($prompt)
+            # Write UTF-8 bytes directly to the underlying stream so the child
+            # CLI sees exactly the bytes we intend, regardless of any default
+            # StreamWriter encoding selected by the runtime.
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            $promptBytes = $utf8NoBom.GetBytes($prompt)
+            $process.StandardInput.BaseStream.Write($promptBytes, 0, $promptBytes.Length)
+            $process.StandardInput.BaseStream.Flush()
         }
         $process.StandardInput.Close()
 

@@ -73,7 +73,20 @@ The bridge script can also be called directly:
 
 # Use a specific model
 & ./scripts/ask_cli.ps1 -Agent claude-code "refactor this" -Model claude-opus-4-7
+
+# Read prompt from a UTF-8 file (recommended for long or non-ASCII prompts)
+& ./scripts/ask_cli.ps1 -Agent codex -PromptFile C:\Temp\review-prompt.txt
+
+# Pipe prompt in
+Get-Content prompt.txt -Raw -Encoding UTF8 | & ./scripts/ask_cli.ps1 -Agent codex
 ```
+
+### Non-ASCII prompts on Windows
+
+The bridge forces the child CLI's stdin to UTF-8 (no BOM) and reads `-PromptFile` as UTF-8. For Chinese/emoji prompts:
+
+- **Prefer `-PromptFile`** — caller writes the prompt to a UTF-8 file and passes the path. Avoids every encoding pitfall along the way.
+- **Use the PowerShell tool, not the Bash tool**, when invoking from another agent. The Claude Code Bash tool on Windows can transcode stdin through the system code page (GBK) before it reaches PowerShell, corrupting bytes before the bridge ever sees them.
 
 ### Script Output
 
@@ -89,7 +102,8 @@ output_path=<file>    # path to the response markdown in .runtime/
 | Option | Alias | Description |
 |--------|-------|-------------|
 | `-Agent` | `-a` | Child CLI name or alias |
-| `-Task` | `-t` | Task text (also first positional arg) |
+| `-Task` | `-t` | Task text (also first positional arg, or via pipeline) |
+| `-PromptFile` | `-pf` | Read prompt body from a UTF-8 file (recommended on Windows for non-ASCII prompts) |
 | `-Workspace` | `-w` | Working directory (default: current dir) |
 | `-File` | `-f` | Priority file paths (repeatable) |
 | `-Session` | | Resume a specific session ID |

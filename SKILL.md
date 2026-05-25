@@ -38,11 +38,24 @@ Useful options:
 
 - `-Workspace <path>`: run the child CLI in a target workspace.
 - `-File <path>`: add priority file hints to the prompt; repeat for multiple files.
+- `-PromptFile <path>` (alias `-pf`): read the prompt body from a UTF-8 file instead of passing it as an argument. **Strongly recommended on Windows when the prompt contains non-ASCII text** (Chinese, emoji, etc.) — writing to a UTF-8 file sidesteps stdin/pipeline encoding pitfalls in the Bash tool and other transports.
 - `-Model <name>`: pass a model override when the configured agent supports it.
 - `-Session <id>`: resume when the configured child CLI supports it.
 - `-NewSession`: ignore the saved session and start a fresh one; save the new session if the child CLI returns an id.
 - `-NoSession`: run without resuming or saving session state.
 - `-Config <path>`: use a different JSON config.
+
+### Passing non-ASCII prompts on Windows
+
+The bridge writes UTF-8 bytes to the child CLI's stdin and accepts UTF-8 prompt files. The most reliable invocation for long/Chinese prompts is:
+
+```powershell
+# 1. Write prompt to a UTF-8 file (use Write tool, or Set-Content -Encoding UTF8)
+# 2. Pass the file path
+& ./scripts/ask_cli.ps1 -Agent codex -PromptFile C:\Temp\prompt.txt
+```
+
+Avoid invoking `ask_cli.ps1` via the Bash tool when the prompt contains non-ASCII characters — Bash on Windows may transcode stdin through the system code page (GBK) before it reaches PowerShell, corrupting the bytes. Use the PowerShell tool instead.
 
 The script prints:
 
