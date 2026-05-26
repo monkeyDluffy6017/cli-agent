@@ -126,7 +126,7 @@ Output (on success):
 function Trim-Whitespace {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return '' }
-    return $Text.Trim() -replace '\s+', ' '
+    return $Text.Trim()
 }
 
 function Write-File-NoBOM {
@@ -1018,8 +1018,16 @@ try {
         $threadId = $threadIdRef.Value
 
         $sessionRegex = [string](Get-PropertyValue -Object $agentConfig -Name 'sessionIdRegex')
-        if ([string]::IsNullOrWhiteSpace($threadId) -and -not [string]::IsNullOrWhiteSpace($sessionRegex) -and $stdoutText -match $sessionRegex) {
-            $threadId = $matches[1]
+        if ([string]::IsNullOrWhiteSpace($threadId) -and -not [string]::IsNullOrWhiteSpace($sessionRegex)) {
+            $matched = $false
+            try {
+                if ($stdoutText -match $sessionRegex) {
+                    $threadId = $matches[1]
+                    $matched = $true
+                }
+            } catch {
+                Write-Verbose "Invalid sessionIdRegex: $($_.Exception.Message)"
+            }
         }
         if ($isResumeMode -and [string]::IsNullOrWhiteSpace($threadId)) {
             $threadId = $Session
@@ -1030,9 +1038,18 @@ try {
             $outputContent += $trimmed
         }
         $sessionRegex = [string](Get-PropertyValue -Object $agentConfig -Name 'sessionIdRegex')
-        if (-not [string]::IsNullOrWhiteSpace($sessionRegex) -and $stdoutText -match $sessionRegex) {
-            $threadId = $matches[1]
-        } elseif ($isResumeMode) {
+        if (-not [string]::IsNullOrWhiteSpace($sessionRegex)) {
+            $matched = $false
+            try {
+                if ($stdoutText -match $sessionRegex) {
+                    $threadId = $matches[1]
+                    $matched = $true
+                }
+            } catch {
+                Write-Verbose "Invalid sessionIdRegex: $($_.Exception.Message)"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($threadId) -and $isResumeMode) {
             $threadId = $Session
         }
     }

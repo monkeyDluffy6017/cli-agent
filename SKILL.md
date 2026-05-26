@@ -5,7 +5,7 @@ description: Route explicit requests from the current coding agent to configured
 
 ## Behavior
 
-- Use the bundled `scripts/ask_cli.ps1` bridge. Do not call `cs`, `csc`, `claude`, or `codex` directly unless the bridge itself is broken.
+- Use the bundled bridge script. On Windows use `scripts/ask_cli.ps1`; on Linux/macOS use `scripts/ask_cli.sh` (requires `jq`). Do not call `cs`, `csc`, `claude`, or `codex` directly unless the bridge itself is broken.
 - When the user says `让 cs ...`, `ask cs to ...`, or similar, call agent `cs`.
 - When the user says `让 csc ...`, `ask csc to ...`, or similar, call agent `csc`.
 - When the user says `让 claude code ...`, `ask claude-code to ...`, `让 claude ...`, or similar, call agent `claude-code`.
@@ -19,7 +19,9 @@ description: Route explicit requests from the current coding agent to configured
 
 ## Command
 
-Resolve the script path relative to this skill directory:
+Resolve the script path relative to this skill directory.
+
+Windows (PowerShell):
 
 ```powershell
 & ./scripts/ask_cli.ps1 -Agent cs "say hi"
@@ -33,6 +35,23 @@ Resolve the script path relative to this skill directory:
 # One-off run: do not resume and do not save the resulting session
 & ./scripts/ask_cli.ps1 -Agent codex "say hi" -NoSession
 ```
+
+Linux/macOS (bash; requires `jq`):
+
+```bash
+./scripts/ask_cli.sh -a cs "say hi"
+./scripts/ask_cli.sh -a csc "say hi"
+./scripts/ask_cli.sh -a claude-code "say hi"
+./scripts/ask_cli.sh -a codex "say hi"
+
+# Force a fresh session
+./scripts/ask_cli.sh -a codex "say hi" --new-session
+
+# One-off run
+./scripts/ask_cli.sh -a codex "say hi" --no-session
+```
+
+The bash script accepts both POSIX-style flags (`--agent`, `--workspace`, `--prompt-file`, `--new-session`, `--no-session`, `--read-only`, `--full-auto`, `--no-summary`) and the PowerShell-style aliases (`-Agent`, `-Workspace`, `-PromptFile`, `-NewSession`, `-NoSession`, etc.) so that the same invocation patterns work across platforms. Run `chmod +x scripts/ask_cli.sh` on first checkout.
 
 Useful options:
 
