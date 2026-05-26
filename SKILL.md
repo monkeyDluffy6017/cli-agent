@@ -14,7 +14,7 @@ description: Route explicit requests from the current coding agent to configured
 - By default, let the bridge auto-resume the last saved session for the same agent and workspace.
 - If the user says `新会话`, `不要续聊`, `不接着上次`, or similar, pass `-NewSession`.
 - If the user says `一次性`, `不要保存 session`, `不要作为后续上下文`, or similar, pass `-NoSession`.
-- After the script succeeds, read `output_path` and report the child CLI response to the user.
+- After the script succeeds, first read the `<summary>` block on stdout for the child CLI's response. If you need the full back-and-forth (tool calls, shell commands, intermediate events), read `transcript_path` (normalized JSONL: `{ts,type,text}`). The full markdown response is at `output_path`.
 - If the requested CLI is not installed or not authenticated, report the command error and the configured command name.
 
 ## Command
@@ -62,9 +62,17 @@ The script prints:
 ```text
 session_id=<id>
 output_path=<path>
+transcript_path=<path>
+<summary>
+...child CLI final response text...
+</summary>
 ```
 
 `session_id` is printed when the child CLI exposes one. The bridge stores it in `.runtime/sessions.json` and auto-resumes it on later calls for the same agent and workspace.
+
+`transcript_path` points to a normalized JSONL file (one `{ts,type,text}` per child stdout/stderr line) — read it when you need to inspect the full exchange (tool calls, intermediate events) rather than just the final answer. It is **only printed if the file was successfully written** — do not assume it exists. Pass `-NoSummary` to suppress the `<summary>` block on stdout.
+
+On failure (`exit != 0`): the script still prints `output_path` (capturing STDOUT and STDERR) and `transcript_path` if it was written; it does **not** print `session_id` or the `<summary>` block. Parent agents should treat absence of `<summary>` as a signal to read `output_path` for diagnosis.
 
 ## Configuration
 

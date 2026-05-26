@@ -48,6 +48,8 @@ param(
     [Alias('o')]
     [string]$Output,
 
+    [switch]$NoSummary,
+
     [switch]$Help,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -110,11 +112,14 @@ Options:
   -ReadOnly                    Read-only mode, if the agent config has readOnlyArgs
   -FullAuto                    Full-auto mode, if the agent config has fullAutoArgs
   -Output, -o <path>           Output file path
+  -NoSummary                   Do not emit the <summary> block on stdout
   -Help                        Show this help
 
 Output (on success):
   session_id=<id>              Printed when the child CLI exposes one
   output_path=<file>           Path to response markdown
+  transcript_path=<file>       Path to normalized JSONL transcript ({ts,type,text})
+  <summary>...</summary>       Final response text (omit with -NoSummary)
 '@
 }
 
@@ -136,6 +141,44 @@ function Ensure-ParentDirectory {
     if ([string]::IsNullOrWhiteSpace($dir)) { return }
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
+function Write-TranscriptJsonl {
+    param(
+        [string]$Path,
+        [string]$StdoutText,
+        [string]$StderrText,
+        [string]$OutputMode
+    )
+    try {
+        Ensure-ParentDirectory -Path $Path
+        $lines = New-Object System.Collections.Generic.List[string]
+        $emitLine = {
+            param($source, $rawLine)
+            if ([string]::IsNullOrEmpty($rawLine)) { return }
+            $entryType = $source
+            if ($source -eq 'stdout' -and $OutputMode -eq 'codex-json' -and $rawLine.TrimStart().StartsWith('{')) {
+                try {
+                    $obj = $rawLine | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($obj -and $obj.type) { $entryType = [string]$obj.type }
+                } catch {}
+            }
+            $entry = [ordered]@{
+                ts = (Get-Date).ToUniversalTime().ToString('o')
+                type = $entryType
+                text = $rawLine
+            }
+            $lines.Add(($entry | ConvertTo-Json -Compress -Depth 4)) | Out-Null
+        }
+        foreach ($raw in ($StdoutText -split "`n")) { & $emitLine 'stdout' ($raw -replace "`r", '') }
+        foreach ($raw in ($StderrText -split "`n")) { & $emitLine 'stderr' ($raw -replace "`r", '') }
+        if ($lines.Count -eq 0) { return $null }
+        Write-File-NoBOM -Path $Path -Content (($lines -join "`n") + "`n")
+        return $Path
+    } catch {
+        Write-Verbose "Failed to write transcript: $($_.Exception.Message)"
+        return $null
     }
 }
 
@@ -365,19 +408,13 @@ function Get-CodexJsonSummary {
                     $outputContent += "### Shell: ``$cmdPreview```n$outPreview"
                 }
 
-                if ($item.type -eq 'tool_call' -and $item.name) {
+                if ($item.type -eq 'tool_call' -and $item.name -eq 'shell') {
                     $args = $null
                     try {
                         $args = $item.arguments | ConvertFrom-Json -ErrorAction SilentlyContinue
                     } catch {}
 
-                    if ($item.name -eq 'write_file' -and $args.path) {
-                        $outputContent += "### File written: $($args.path)"
-                    }
-                    if ($item.name -eq 'patch_file' -and $args.path) {
-                        $outputContent += "### File patched: $($args.path)"
-                    }
-                    if ($item.name -eq 'shell' -and $args.command) {
+                    if ($args.command) {
                         $cmdPreview = $args.command.Substring(0, [Math]::Min(200, $args.command.Length))
                         $outPreview = ''
                         if ($item.output) {
@@ -689,9 +726,11 @@ if (-not (Test-Path $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
 
+$runGuid = [guid]::NewGuid().ToString('N').Substring(0, 8)
 if ([string]::IsNullOrEmpty($Output)) {
-    $Output = Join-Path $runtimeDir "$timestamp-$Agent.md"
+    $Output = Join-Path $runtimeDir "$timestamp-$Agent-$runGuid.md"
 }
+$transcriptPath = [System.IO.Path]::ChangeExtension($Output, '.jsonl')
 
 $sessionStatePath = Join-Path $runtimeDir 'sessions.json'
 $sessionKey = Get-SessionKey -Agent $Agent -Workspace $Workspace
@@ -956,6 +995,9 @@ try {
 
         Ensure-ParentDirectory -Path $Output
         Write-File-NoBOM -Path $Output -Content ($failureContent -join "`n`n")
+        $writtenTranscript = Write-TranscriptJsonl -Path $transcriptPath -StdoutText $stdoutText -StderrText $stderrText -OutputMode $outputMode
+        Write-Output "output_path=$Output"
+        if ($writtenTranscript) { Write-Output "transcript_path=$writtenTranscript" }
         Write-Error "[ERROR] Agent '$Agent' exited with code $exitCode. Captured output: $Output"
         exit 1
     }
@@ -1007,10 +1049,27 @@ try {
         Write-File-NoBOM -Path $Output -Content "(no response from $Agent)"
     }
 
+    $writtenTranscript = Write-TranscriptJsonl -Path $transcriptPath -StdoutText $stdoutText -StderrText $stderrText -OutputMode $outputMode
+
     if (-not [string]::IsNullOrEmpty($threadId)) {
         Write-Output "session_id=$threadId"
     }
     Write-Output "output_path=$Output"
+    if ($writtenTranscript) { Write-Output "transcript_path=$writtenTranscript" }
+
+    if (-not $NoSummary) {
+        $summaryBody = if ($outputContent.Count -gt 0) {
+            ($outputContent -join "`n").Trim()
+        } else {
+            $stdoutText.Trim()
+        }
+        if ($summaryBody.Length -gt 4000) {
+            $summaryBody = $summaryBody.Substring(0, 4000) + "`n...(truncated)"
+        }
+        Write-Output "<summary>"
+        Write-Output $summaryBody
+        Write-Output "</summary>"
+    }
 } finally {
     & $cleanupScript
 }

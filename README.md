@@ -93,9 +93,21 @@ The bridge forces the child CLI's stdin to UTF-8 (no BOM) and reads `-PromptFile
 On success, the script prints:
 
 ```
-session_id=<id>       # when the child CLI exposes a session id
-output_path=<file>    # path to the response markdown in .runtime/
+session_id=<id>          # when the child CLI exposes a session id
+output_path=<file>       # path to the response markdown in .runtime/
+transcript_path=<file>   # path to normalized JSONL transcript ({ts,type,text})
+<summary>
+...final response text...
+</summary>
 ```
+
+The `<summary>` block lets parent CLIs (opencode, codex, etc.) that only capture stdout see the child's final answer without reading any file. Pass `-NoSummary` to suppress it. The JSONL transcript preserves the full child stream for auditing or replay.
+
+`transcript_path` is only printed if the JSONL was successfully written — callers must not assume it always appears.
+
+On failure (`exit != 0`): the script writes captured STDOUT/STDERR to `output_path` and still emits `transcript_path` if the JSONL was written. It does **not** emit `session_id` or `<summary>` in this case.
+
+> **Note:** prompts, responses, and transcript JSONL are all written under `.runtime/` in plaintext. Don't pass secrets you wouldn't want on disk — the bridge does no redaction.
 
 ### Options
 
@@ -113,6 +125,7 @@ output_path=<file>    # path to the response markdown in .runtime/
 | `-Reasoning` | | Reasoning effort: `low`, `medium`, `high` |
 | `-Config` | `-c` | Path to a custom JSON config |
 | `-Output` | `-o` | Output file path |
+| `-NoSummary` | | Suppress the `<summary>` block on stdout |
 | `-ReadOnly` | | Read-only sandbox mode |
 | `-FullAuto` | | Full-auto mode |
 
