@@ -1,6 +1,6 @@
 # cli-agent
 
-A Claude Code skill that routes tasks from the current coding agent to configured child CLI agents (cs, csc, Claude Code, Codex, etc.) via a PowerShell bridge script.
+A Claude Code skill that routes tasks from the current coding agent to configured child CLI agents (cs, csc, Claude Code, OpenCode, Codex, etc.) via the bundled bridge scripts.
 
 ## Overview
 
@@ -12,8 +12,11 @@ A Claude Code skill that routes tasks from the current coding agent to configure
 cli-agent/
 ├── SKILL.md            # Skill definition and behavior rules
 ├── cli-agents.json     # Agent configuration and aliases
+├── config/
+│   └── opencode-full-permissions.json
 ├── scripts/
-│   └── ask_cli.ps1    # Bridge script that invokes child CLIs
+│   ├── ask_cli.ps1    # Windows PowerShell bridge
+│   └── ask_cli.sh     # Linux/macOS bash bridge
 └── .runtime/           # Auto-created: session state and output files
     └── sessions.json   # Persisted session IDs per agent/workspace
 ```
@@ -22,10 +25,13 @@ cli-agent/
 
 | Alias | Agent | Invocation |
 |-------|-------|------------|
-| `cs` | cs | `cs run --dir {workspace} --format json {prompt}` |
-| `csc` | csc | `csc -p --output-format json {prompt}` |
-| `claude`, `claude-code` | claude-code | `claude -p --output-format json {prompt}` |
-| `codex` | codex | `codex exec --json` (prompt via stdin) |
+| `cs` | cs | `cs run --dir {workspace} --format json {prompt}` with bundled OpenCode permissions |
+| `csc` | csc | `csc -p --permission-mode bypassPermissions --output-format json {prompt}` |
+| `claude`, `claude-code` | claude-code | `claude -p --permission-mode bypassPermissions --output-format json {prompt}` |
+| `opencode` | opencode | `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` |
+| `codex` | codex | `codex --sandbox danger-full-access --ask-for-approval never exec --json` (prompt via stdin) |
+
+The bundled configuration defaults these agents to full-auto/high-permission mode. For CS/OpenCode, the bridge sets `OPENCODE_CONFIG` and inlines the same file through `OPENCODE_CONFIG_CONTENT` so the runtime permission override comes from `config/opencode-full-permissions.json`.
 
 ## Usage (via Skill)
 
@@ -33,6 +39,7 @@ Trigger phrases (Chinese or English):
 
 ```
 让 cs 检查这个文件
+让 opencode 检查这个文件
 让 codex 修复这个 bug
 ask claude code to review this repo
 让 csc 说 hello
@@ -107,6 +114,10 @@ The `<summary>` block lets parent CLIs (opencode, codex, etc.) that only capture
 
 On failure (`exit != 0`): the script writes captured STDOUT/STDERR to `output_path` and still emits `transcript_path` if the JSONL was written. It does **not** emit `session_id` or `<summary>` in this case.
 
+### Runtime Cleanup
+
+The bridge keeps runtime output files for 3 days by default. On each run it removes old `*.md`, `*.jsonl`, and `*.txt` files directly under `.runtime/`, while preserving `sessions.json` for session resume.
+
 > **Note:** prompts, responses, and transcript JSONL are all written under `.runtime/` in plaintext. Don't pass secrets you wouldn't want on disk — the bridge does no redaction.
 
 ### Options
@@ -127,9 +138,17 @@ On failure (`exit != 0`): the script writes captured STDOUT/STDERR to `output_pa
 | `-Output` | `-o` | Output file path |
 | `-NoSummary` | | Suppress the `<summary>` block on stdout |
 | `-ReadOnly` | | Read-only sandbox mode |
-| `-FullAuto` | | Full-auto mode |
+| `-FullAuto` | | Full-auto mode for custom configs; enabled by default in the bundled agent config |
 
 ## Configuration (`cli-agents.json`)
+
+Top-level fields:
+
+| Field | Description |
+|-------|-------------|
+| `defaultAgent` | Agent used when `-Agent` is omitted |
+| `runtimeDir` | Directory for response files, transcripts, and session state |
+| `runtimeRetentionDays` | Days to keep runtime `*.md`, `*.jsonl`, and `*.txt` files; defaults to `3` |
 
 Each agent entry supports:
 
@@ -144,6 +163,11 @@ Each agent entry supports:
 | `resumeArgs` | Arguments for resuming a session |
 | `promptArgs` | Prompt-specific arguments |
 | `modelArgs` | Model override arguments |
+| `defaultFullAuto` | Apply `fullAutoArgs` without requiring `-FullAuto` |
+| `fullAutoArgs` | Permission/autonomy arguments for full-auto runs |
+| `permissionArgsPosition` | Use `beforeBase` when permission args must precede `newArgs`/`resumeArgs` |
+| `environment` | Environment variables to set on the child process; values support placeholders |
+| `environmentFiles` | Environment variables whose values are loaded from UTF-8 files; paths support placeholders |
 | `outputMode` | `text`, `generic-json`, or `codex-json` |
 | `sessionIdRegex` | Regex to extract session ID from output |
 
@@ -152,10 +176,10 @@ Each agent entry supports:
 Placeholders in arg templates are expanded at runtime:
 
 ```
-{agent}        {workspace}     {task}
-{prompt}       {prompt_file}   {session}
-{model}        {reasoning}     {sandbox}
-{output}
+{agent}        {skill_root}    {workspace}
+{task}         {prompt}        {prompt_file}
+{session}      {model}         {reasoning}
+{sandbox}      {output}
 ```
 
 ## Session Persistence

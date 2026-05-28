@@ -201,6 +201,45 @@ function ConvertTo-StringArray {
     return $items
 }
 
+function Test-ConfigTruthy {
+    param([object]$Value)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return [bool]$Value }
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    return @('1', 'true', 'yes', 'on') -contains $text
+}
+
+function Get-RuntimeRetentionDays {
+    param([object]$Value)
+    if ($null -eq $Value) { return 3 }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return 3 }
+    $parsed = 3
+    if ([int]::TryParse($text, [ref]$parsed)) { return $parsed }
+    return 3
+}
+
+function Invoke-RuntimeCleanup {
+    param(
+        [string]$RuntimeDir,
+        [int]$RetentionDays
+    )
+
+    if ($RetentionDays -lt 0) { return }
+    if (-not (Test-Path $RuntimeDir -PathType Container)) { return }
+
+    $cutoffUtc = (Get-Date).ToUniversalTime().AddDays(-1 * $RetentionDays)
+    $managedExtensions = @('.md', '.jsonl', '.txt')
+
+    Get-ChildItem -LiteralPath $RuntimeDir -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -ne 'sessions.json' -and
+        $managedExtensions -contains $_.Extension.ToLowerInvariant() -and
+        $_.LastWriteTimeUtc -lt $cutoffUtc
+    } | ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Expand-Template {
     param(
         [string]$Text,
@@ -725,6 +764,8 @@ $runtimeDir = if ([System.IO.Path]::IsPathRooted($runtimeDirName)) { $runtimeDir
 if (-not (Test-Path $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
+$runtimeRetentionDays = Get-RuntimeRetentionDays (Get-PropertyValue -Object $configObject -Name 'runtimeRetentionDays')
+Invoke-RuntimeCleanup -RuntimeDir $runtimeDir -RetentionDays $runtimeRetentionDays
 
 $runGuid = [guid]::NewGuid().ToString('N').Substring(0, 8)
 if ([string]::IsNullOrEmpty($Output)) {
@@ -750,6 +791,7 @@ $promptFile = Join-Path $tempDir "cli_agent_prompt_$guid.txt"
 
 $vars = @{
     agent = $Agent
+    skill_root = $skillRoot
     workspace = $Workspace
     task = $Task
     prompt = $prompt
@@ -783,21 +825,30 @@ if ($isResumeMode) {
         Write-Error "[ERROR] Agent '$Agent' does not define resumeArgs."
         exit 1
     }
-    $childArgs = Expand-Args -InputArgs $rawArgs -Vars $vars
+    $baseArgs = Expand-Args -InputArgs $rawArgs -Vars $vars
 } else {
-    $childArgs = Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'newArgs') -Vars $vars
+    $baseArgs = Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'newArgs') -Vars $vars
+}
 
-    if ($ReadOnly) {
-        $childArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'readOnlyArgs') -Vars $vars
-    } elseif (-not [string]::IsNullOrEmpty($Sandbox)) {
-        $childArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'sandboxArgs') -Vars $vars
-    } elseif ($FullAuto) {
-        $childArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'fullAutoArgs') -Vars $vars
-    }
+$permissionArgs = @()
+$defaultFullAuto = Test-ConfigTruthy (Get-PropertyValue -Object $agentConfig -Name 'defaultFullAuto')
+if ($ReadOnly) {
+    $permissionArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'readOnlyArgs') -Vars $vars
+} elseif (-not [string]::IsNullOrEmpty($Sandbox)) {
+    $permissionArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'sandboxArgs') -Vars $vars
+} elseif ($FullAuto -or $defaultFullAuto) {
+    $permissionArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'fullAutoArgs') -Vars $vars
+}
 
-    if (-not [string]::IsNullOrEmpty($Model)) {
-        $childArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'modelArgs') -Vars $vars
-    }
+$permissionArgsPosition = [string](Get-PropertyValue -Object $agentConfig -Name 'permissionArgsPosition')
+if ($permissionArgs.Count -gt 0 -and $permissionArgsPosition -eq 'beforeBase') {
+    $childArgs = @($permissionArgs) + @($baseArgs)
+} else {
+    $childArgs = @($baseArgs) + @($permissionArgs)
+}
+
+if (-not $isResumeMode -and -not [string]::IsNullOrEmpty($Model)) {
+    $childArgs += Expand-Args -InputArgs (Get-PropertyValue -Object $agentConfig -Name 'modelArgs') -Vars $vars
 }
 
 $promptMode = [string](Get-PropertyValue -Object $agentConfig -Name 'promptMode')
@@ -868,6 +919,26 @@ try {
     # code page on Windows (e.g. GBK on zh-CN), and non-ASCII prompts arrive at
     # the child CLI as mojibake / invalid UTF-8.
     try { $psi.StandardInputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
+
+    $environmentConfig = Get-PropertyValue -Object $agentConfig -Name 'environment'
+    if ($environmentConfig) {
+        foreach ($prop in $environmentConfig.PSObject.Properties) {
+            $psi.EnvironmentVariables[$prop.Name] = Expand-Template -Text ([string]$prop.Value) -Vars $vars
+        }
+    }
+
+    $environmentFilesConfig = Get-PropertyValue -Object $agentConfig -Name 'environmentFiles'
+    if ($environmentFilesConfig) {
+        foreach ($prop in $environmentFilesConfig.PSObject.Properties) {
+            $envFilePath = Expand-Template -Text ([string]$prop.Value) -Vars $vars
+            if (-not (Test-Path $envFilePath -PathType Leaf)) {
+                Write-Error "[ERROR] Environment file for '$($prop.Name)' does not exist: $envFilePath"
+                exit 1
+            }
+            $resolvedEnvFilePath = (Resolve-Path $envFilePath).Path
+            $psi.EnvironmentVariables[$prop.Name] = [System.IO.File]::ReadAllText($resolvedEnvFilePath, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi

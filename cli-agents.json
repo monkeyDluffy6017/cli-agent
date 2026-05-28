@@ -1,12 +1,14 @@
 {
   "defaultAgent": "cs",
   "runtimeDir": ".runtime",
+  "runtimeRetentionDays": 3,
   "aliases": {
     "cs": "cs",
     "csc": "csc",
     "claude": "claude-code",
     "claude code": "claude-code",
     "claude-code": "claude-code",
+    "opencode": "opencode",
     "codex": "codex"
   },
   "agents": {
@@ -20,6 +22,13 @@
       "resumeArgs": ["run", "--dir", "{workspace}", "--session", "{session}", "--format", "json"],
       "promptArgs": ["{prompt}"],
       "modelArgs": ["--model", "{model}"],
+      "defaultFullAuto": true,
+      "environment": {
+        "OPENCODE_CONFIG": "{skill_root}/config/opencode-full-permissions.json"
+      },
+      "environmentFiles": {
+        "OPENCODE_CONFIG_CONTENT": "{skill_root}/config/opencode-full-permissions.json"
+      },
       "outputMode": "generic-json",
       "progressPrefix": "[cs]",
       "workingDirectory": "{workspace}",
@@ -33,6 +42,8 @@
       "resumeArgs": ["--resume", "{session}", "-p", "--output-format", "json"],
       "promptArgs": ["{prompt}"],
       "modelArgs": ["--model", "{model}"],
+      "defaultFullAuto": true,
+      "fullAutoArgs": ["--permission-mode", "bypassPermissions"],
       "outputMode": "generic-json",
       "progressPrefix": "[claude-code]",
       "workingDirectory": "{workspace}",
@@ -46,8 +57,31 @@
       "resumeArgs": ["--resume", "{session}", "-p", "--output-format", "json"],
       "promptArgs": ["{prompt}"],
       "modelArgs": ["--model", "{model}"],
+      "defaultFullAuto": true,
+      "fullAutoArgs": ["--permission-mode", "bypassPermissions"],
       "outputMode": "generic-json",
       "progressPrefix": "[csc]",
+      "workingDirectory": "{workspace}",
+      "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
+    },
+    "opencode": {
+      "command": "opencode",
+      "invocation": "shell",
+      "promptMode": "argument",
+      "newArgs": ["run", "--dir", "{workspace}", "--format", "json"],
+      "resumeArgs": ["run", "--dir", "{workspace}", "--session", "{session}", "--format", "json"],
+      "promptArgs": ["{prompt}"],
+      "modelArgs": ["--model", "{model}"],
+      "defaultFullAuto": true,
+      "fullAutoArgs": ["--dangerously-skip-permissions"],
+      "environment": {
+        "OPENCODE_CONFIG": "{skill_root}/config/opencode-full-permissions.json"
+      },
+      "environmentFiles": {
+        "OPENCODE_CONFIG_CONTENT": "{skill_root}/config/opencode-full-permissions.json"
+      },
+      "outputMode": "generic-json",
+      "progressPrefix": "[opencode]",
       "workingDirectory": "{workspace}",
       "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
     },
@@ -58,6 +92,8 @@
       "outputMode": "codex-json",
       "progressPrefix": "[codex]",
       "workingDirectory": "{workspace}",
+      "defaultFullAuto": true,
+      "permissionArgsPosition": "beforeBase",
       "newArgs": [
         "exec",
         "--cd",
@@ -79,7 +115,8 @@
       ],
       "modelArgs": ["-m", "{model}"],
       "readOnlyArgs": ["--sandbox", "read-only"],
-      "sandboxArgs": ["--sandbox", "{sandbox}"]
+      "sandboxArgs": ["--sandbox", "{sandbox}"],
+      "fullAutoArgs": ["--sandbox", "danger-full-access", "--ask-for-approval", "never"]
     }
   }
 }

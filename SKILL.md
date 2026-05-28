@@ -1,13 +1,14 @@
 ---
 name: cli-agent
-description: Route explicit requests from the current coding agent to configured child CLIs. Use when the user asks Codex or Claude Code to have cs, csc, Claude Code, claude-code, claude, or codex do something, for example "让 cs say hi", "让 csc 检查这个文件", "让 claude code 检查这个文件", "让 codex 修复这个 bug", or "ask codex to review this repo". The skill extracts the requested child CLI and task, runs the configured bridge script, then reports the child CLI output.
+description: Route explicit requests from the current coding agent to configured child CLIs. Use when the user asks Codex or Claude Code to have cs, csc, OpenCode, Claude Code, claude-code, claude, or codex do something, for example "让 cs say hi", "让 csc 检查这个文件", "让 opencode 检查这个文件", "让 claude code 检查这个文件", "让 codex 修复这个 bug", or "ask codex to review this repo". The skill extracts the requested child CLI and task, runs the configured bridge script, then reports the child CLI output.
 ---
 
 ## Behavior
 
-- Use the bundled bridge script. On Windows use `scripts/ask_cli.ps1`; on Linux/macOS use `scripts/ask_cli.sh` (requires `jq`). Do not call `cs`, `csc`, `claude`, or `codex` directly unless the bridge itself is broken.
+- Use the bundled bridge script. On Windows use `scripts/ask_cli.ps1`; on Linux/macOS use `scripts/ask_cli.sh` (requires `jq`). Do not call `cs`, `csc`, `opencode`, `claude`, or `codex` directly unless the bridge itself is broken.
 - When the user says `让 cs ...`, `ask cs to ...`, or similar, call agent `cs`.
 - When the user says `让 csc ...`, `ask csc to ...`, or similar, call agent `csc`.
+- When the user says `让 opencode ...`, `ask opencode to ...`, or similar, call agent `opencode`.
 - When the user says `让 claude code ...`, `ask claude-code to ...`, `让 claude ...`, or similar, call agent `claude-code`.
 - When the user says `让 codex ...`, `ask codex to ...`, or similar, call agent `codex`.
 - Pass only the child task to the child CLI. For `让 cs say hi`, send `say hi`, not the full routing phrase.
@@ -27,6 +28,7 @@ Windows (PowerShell):
 & ./scripts/ask_cli.ps1 -Agent cs "say hi"
 & ./scripts/ask_cli.ps1 -Agent csc "say hi"
 & ./scripts/ask_cli.ps1 -Agent claude-code "say hi"
+& ./scripts/ask_cli.ps1 -Agent opencode "say hi"
 & ./scripts/ask_cli.ps1 -Agent codex "say hi"
 
 # Force a fresh session and save it as the new active session
@@ -42,6 +44,7 @@ Linux/macOS (bash; requires `jq`):
 ./scripts/ask_cli.sh -a cs "say hi"
 ./scripts/ask_cli.sh -a csc "say hi"
 ./scripts/ask_cli.sh -a claude-code "say hi"
+./scripts/ask_cli.sh -a opencode "say hi"
 ./scripts/ask_cli.sh -a codex "say hi"
 
 # Force a fresh session
@@ -62,6 +65,7 @@ Useful options:
 - `-Session <id>`: resume when the configured child CLI supports it.
 - `-NewSession`: ignore the saved session and start a fresh one; save the new session if the child CLI returns an id.
 - `-NoSession`: run without resuming or saving session state.
+- `-FullAuto`: request full-auto permission args for custom configs. The bundled config enables this by default for all preconfigured agents.
 - `-Config <path>`: use a different JSON config.
 
 ### Passing non-ASCII prompts on Windows
@@ -93,25 +97,37 @@ transcript_path=<path>
 
 On failure (`exit != 0`): the script still prints `output_path` (capturing STDOUT and STDERR) and `transcript_path` if it was written; it does **not** print `session_id` or the `<summary>` block. Parent agents should treat absence of `<summary>` as a signal to read `output_path` for diagnosis.
 
+Runtime cleanup: on each run, the bridge removes `*.md`, `*.jsonl`, and `*.txt` files directly under `.runtime/` that are older than `runtimeRetentionDays` (default `3`). It preserves `sessions.json`.
+
 ## Configuration
 
 The bridge reads `cli-agents.json` next to this `SKILL.md`.
 
 Preconfigured agents:
 
-- `cs`: runs `cs run --dir {workspace} --format json {prompt}`.
-- `csc`: runs `csc -p --output-format json {prompt}`.
-- `claude-code`: runs `claude -p --output-format json {prompt}`.
-- `codex`: runs `codex exec --cd {workspace} --skip-git-repo-check --json` and sends the prompt on stdin.
+- `cs`: runs `cs run --dir {workspace} --format json {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
+- `csc`: runs `csc -p --permission-mode bypassPermissions --output-format json {prompt}`.
+- `claude-code`: runs `claude -p --permission-mode bypassPermissions --output-format json {prompt}`.
+- `opencode`: runs `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
+- `codex`: runs `codex --sandbox danger-full-access --ask-for-approval never exec --cd {workspace} --skip-git-repo-check --json` and sends the prompt on stdin.
 
 Aliases:
 
 - `cs` routes to `cs`.
 - `csc` routes to `csc`.
 - `claude`, `claude code`, and `claude-code` route to `claude-code`.
+- `opencode` routes to `opencode`.
 - `codex` routes to `codex`.
 
 Each agent can define:
+
+Top-level config fields:
+
+- `defaultAgent`: agent used when `-Agent` is omitted.
+- `runtimeDir`: directory for response files, transcripts, and session state.
+- `runtimeRetentionDays`: days to keep runtime `*.md`, `*.jsonl`, and `*.txt` files; defaults to `3`.
+
+Agent fields:
 
 - `command`: executable name or absolute path.
 - `invocation`: `direct` or `shell`.
@@ -120,6 +136,11 @@ Each agent can define:
 - `resumeArgs`: arguments for continuing a previous session.
 - `promptArgs`: prompt-related arguments.
 - `modelArgs`: optional model override arguments.
+- `defaultFullAuto`: whether to apply `fullAutoArgs` without requiring `-FullAuto`.
+- `fullAutoArgs`: permission/autonomy arguments used for full-auto runs.
+- `permissionArgsPosition`: set to `beforeBase` when permission args must appear before `newArgs`/`resumeArgs` (Codex global flags need this).
+- `environment`: environment variables to set on the child process; values support placeholders.
+- `environmentFiles`: environment variables whose values are loaded from UTF-8 files; paths support placeholders.
 - `outputMode`: `text` for plain stdout or `codex-json` for Codex-style JSON event streams.
 - `sessionIdRegex`: optional regex where capture group 1 is the session id.
 
@@ -127,6 +148,7 @@ Supported placeholders:
 
 ```text
 {agent}
+{skill_root}
 {workspace}
 {task}
 {prompt}

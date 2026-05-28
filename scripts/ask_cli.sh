@@ -237,6 +237,21 @@ case "$RUNTIME_DIR_NAME" in
 esac
 mkdir -p "$RUNTIME_DIR"
 
+RUNTIME_RETENTION_DAYS="$(jq -r '.runtimeRetentionDays // 3' "$CONFIG")"
+case "$RUNTIME_RETENTION_DAYS" in
+    ''|*[!0-9-]*) RUNTIME_RETENTION_DAYS=3 ;;
+esac
+
+cleanup_runtime_dir() {
+    local dir="$1" days="$2"
+    [[ "$days" == -* ]] && return 0
+    [[ ! -d "$dir" ]] && return 0
+    find "$dir" -maxdepth 1 -type f \( -name '*.md' -o -name '*.jsonl' -o -name '*.txt' \) \
+        ! -name 'sessions.json' -mtime +"$days" -exec rm -f {} + 2>/dev/null || true
+}
+
+cleanup_runtime_dir "$RUNTIME_DIR" "$RUNTIME_RETENTION_DAYS"
+
 RUN_GUID="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%08x' $RANDOM$RANDOM)"
 if [[ -z "$OUTPUT" ]]; then
     OUTPUT="$RUNTIME_DIR/$TIMESTAMP-$AGENT-$RUN_GUID.md"
@@ -294,6 +309,7 @@ printf '%s' "$PROMPT" > "$TMP_PROMPT_FILE"
 expand_template() {
     local s="$1"
     s="${s//\{agent\}/$AGENT}"
+    s="${s//\{skill_root\}/$SKILL_ROOT}"
     s="${s//\{workspace\}/$WORKSPACE}"
     s="${s//\{task\}/$TASK}"
     s="${s//\{prompt\}/$PROMPT}"
@@ -329,6 +345,38 @@ expand_args_from_config() {
 
 agent_get() {
     jq -r --arg a "$AGENT" --arg k "$1" '.agents[$a][$k] // ""' "$CONFIG"
+}
+
+agent_bool() {
+    local raw
+    raw="$(jq -r --arg a "$AGENT" --arg k "$1" '.agents[$a][$k] // false | if type == "boolean" then tostring else tostring end' "$CONFIG")"
+    case "${raw,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+load_environment_from_config() {
+    ENV_OUT=()
+    local row key raw
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
+        key="${row%%	*}"
+        raw="${row#*	}"
+        ENV_OUT+=("$key=$(expand_template "$raw")")
+    done < <(jq -r --arg a "$AGENT" '.agents[$a].environment // {} | to_entries[] | [.key, (.value | tostring)] | @tsv' "$CONFIG")
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
+        key="${row%%	*}"
+        raw="${row#*	}"
+        local env_file
+        env_file="$(expand_template "$raw")"
+        if [[ ! -f "$env_file" ]]; then
+            echo "[ERROR] Environment file for '$key' does not exist: $env_file" >&2
+            exit 1
+        fi
+        ENV_OUT+=("$key=$(cat "$env_file")")
+    done < <(jq -r --arg a "$AGENT" '.agents[$a].environmentFiles // {} | to_entries[] | [.key, (.value | tostring)] | @tsv' "$CONFIG")
 }
 
 extract_session_id_from_regex() {
@@ -398,8 +446,11 @@ if ! command -v "$COMMAND" >/dev/null 2>&1 && [[ ! -x "$COMMAND" ]]; then
     exit 1
 fi
 
+load_environment_from_config
+
 # ---------- build child args ----------
 CHILD_ARGS=()
+BASE_ARGS=()
 IS_RESUME=0
 if [[ -n "$SESSION" ]]; then
     IS_RESUME=1
@@ -408,26 +459,34 @@ if [[ -n "$SESSION" ]]; then
         exit 1
     fi
     expand_args_from_config resumeArgs
-    CHILD_ARGS+=("${ARGS_OUT[@]}")
+    BASE_ARGS+=("${ARGS_OUT[@]}")
 else
     expand_args_from_config newArgs
+    BASE_ARGS+=("${ARGS_OUT[@]}")
+fi
+
+PERMISSION_ARGS=()
+if (( READ_ONLY )); then
+    expand_args_from_config readOnlyArgs
+    PERMISSION_ARGS+=("${ARGS_OUT[@]}")
+elif [[ -n "$SANDBOX" ]]; then
+    expand_args_from_config sandboxArgs
+    PERMISSION_ARGS+=("${ARGS_OUT[@]}")
+elif (( FULL_AUTO )) || agent_bool defaultFullAuto; then
+    expand_args_from_config fullAutoArgs
+    PERMISSION_ARGS+=("${ARGS_OUT[@]}")
+fi
+
+PERMISSION_ARGS_POSITION="$(agent_get permissionArgsPosition)"
+if [[ "$PERMISSION_ARGS_POSITION" == "beforeBase" && ${#PERMISSION_ARGS[@]} -gt 0 ]]; then
+    CHILD_ARGS+=("${PERMISSION_ARGS[@]}" "${BASE_ARGS[@]}")
+else
+    CHILD_ARGS+=("${BASE_ARGS[@]}" "${PERMISSION_ARGS[@]}")
+fi
+
+if (( ! IS_RESUME )) && [[ -n "$MODEL" ]]; then
+    expand_args_from_config modelArgs
     CHILD_ARGS+=("${ARGS_OUT[@]}")
-
-    if (( READ_ONLY )); then
-        expand_args_from_config readOnlyArgs
-        CHILD_ARGS+=("${ARGS_OUT[@]}")
-    elif [[ -n "$SANDBOX" ]]; then
-        expand_args_from_config sandboxArgs
-        CHILD_ARGS+=("${ARGS_OUT[@]}")
-    elif (( FULL_AUTO )); then
-        expand_args_from_config fullAutoArgs
-        CHILD_ARGS+=("${ARGS_OUT[@]}")
-    fi
-
-    if [[ -n "$MODEL" ]]; then
-        expand_args_from_config modelArgs
-        CHILD_ARGS+=("${ARGS_OUT[@]}")
-    fi
 fi
 
 # Prompt mode injection
@@ -516,15 +575,15 @@ run_child() {
             q+=" $(posix_quote "$arg")"
         done
         if [[ "$PROMPT_MODE" == "stdin" ]]; then
-            ( cd "$WORKING_DIRECTORY" && /bin/sh -lc "$q" < "$TMP_PROMPT_FILE" )
+            ( cd "$WORKING_DIRECTORY" && env "${ENV_OUT[@]}" /bin/sh -lc "$q" < "$TMP_PROMPT_FILE" )
         else
-            ( cd "$WORKING_DIRECTORY" && /bin/sh -lc "$q" < /dev/null )
+            ( cd "$WORKING_DIRECTORY" && env "${ENV_OUT[@]}" /bin/sh -lc "$q" < /dev/null )
         fi
     else
         if [[ "$PROMPT_MODE" == "stdin" ]]; then
-            ( cd "$WORKING_DIRECTORY" && "$COMMAND" "${CHILD_ARGS[@]}" < "$TMP_PROMPT_FILE" )
+            ( cd "$WORKING_DIRECTORY" && env "${ENV_OUT[@]}" "$COMMAND" "${CHILD_ARGS[@]}" < "$TMP_PROMPT_FILE" )
         else
-            ( cd "$WORKING_DIRECTORY" && "$COMMAND" "${CHILD_ARGS[@]}" < /dev/null )
+            ( cd "$WORKING_DIRECTORY" && env "${ENV_OUT[@]}" "$COMMAND" "${CHILD_ARGS[@]}" < /dev/null )
         fi
     fi
 }
