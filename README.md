@@ -26,12 +26,12 @@ cli-agent/
 | Alias | Agent | Invocation |
 |-------|-------|------------|
 | `cs` | cs | `cs run --dir {workspace} --format json {prompt}` with bundled OpenCode permissions |
-| `csc` | csc | `csc -p --permission-mode bypassPermissions --output-format json {prompt}` |
+| `csc` | csc | `csc -p --dangerously-skip-permissions --output-format json {prompt}` |
 | `claude`, `claude-code` | claude-code | `claude -p --permission-mode bypassPermissions --output-format json {prompt}` |
 | `opencode` | opencode | `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` |
 | `codex` | codex | `codex --sandbox danger-full-access --ask-for-approval never exec --json` (prompt via stdin) |
 
-The bundled configuration defaults these agents to full-auto/high-permission mode. For CS/OpenCode, the bridge sets `OPENCODE_CONFIG` and inlines the same file through `OPENCODE_CONFIG_CONTENT` so the runtime permission override comes from `config/opencode-full-permissions.json`.
+The bundled configuration defaults these agents to full-auto/high-permission mode. For CS/OpenCode, the bridge sets `OPENCODE_CONFIG` and inlines the same file through `OPENCODE_CONFIG_CONTENT` so the runtime permission override comes from `config/opencode-full-permissions.json`. For CSC, the bridge sets `CSC_RAW_DUMP_MODE=0` so background raw-dump workers do not interfere with parent stdout capture.
 
 ## Usage (via Skill)
 
@@ -94,6 +94,10 @@ The bridge forces the child CLI's stdin to UTF-8 (no BOM) and reads `-PromptFile
 
 - **Prefer `-PromptFile`** — caller writes the prompt to a UTF-8 file and passes the path. Avoids every encoding pitfall along the way.
 - **Use the PowerShell tool, not the Bash tool**, when invoking from another agent. The Claude Code Bash tool on Windows can transcode stdin through the system code page (GBK) before it reaches PowerShell, corrupting bytes before the bridge ever sees them.
+
+### Long-running tasks
+
+The bridge has **no timeout** — it waits for the child CLI to finish via a blocking `WaitForExit()` (PowerShell) / foreground `run_child` (bash). Child tasks may run for a long time, so parent agents must wait without imposing a timeout: run the bridge in the background and wait for completion, or set the calling tool's timeout to its maximum. Don't abort or kill the call just because it is slow.
 
 ### Script Output
 

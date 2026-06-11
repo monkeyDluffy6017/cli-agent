@@ -61,6 +61,11 @@ $claudeAgent = $repoConfig.agents.'claude-code'
 Assert-True ([bool](Get-JsonProperty -Object $claudeAgent -Name 'defaultFullAuto')) 'claude-code should default to full-auto permission mode.'
 Assert-ArrayContainsSubsequence -Actual $claudeAgent.fullAutoArgs -Expected @('--permission-mode', 'bypassPermissions') -Message 'claude-code fullAutoArgs should bypass permissions.'
 
+$cscAgent = $repoConfig.agents.csc
+Assert-True ([bool](Get-JsonProperty -Object $cscAgent -Name 'defaultFullAuto')) 'csc should default to full-auto permission mode.'
+Assert-ArrayContainsSubsequence -Actual $cscAgent.fullAutoArgs -Expected @('--dangerously-skip-permissions') -Message 'csc fullAutoArgs should use the native CoStrict permission bypass flag.'
+Assert-True ($cscAgent.environment.CSC_RAW_DUMP_MODE -eq '0') 'csc should disable raw dump workers so bridge stdout remains capturable.'
+
 $codexAgent = $repoConfig.agents.codex
 Assert-True ([bool](Get-JsonProperty -Object $codexAgent -Name 'defaultFullAuto')) 'codex should default to full-auto permission mode.'
 Assert-ArrayContainsSubsequence -Actual $codexAgent.fullAutoArgs -Expected @('--sandbox', 'danger-full-access', '--ask-for-approval', 'never') -Message 'codex fullAutoArgs should disable sandbox and approval prompts.'

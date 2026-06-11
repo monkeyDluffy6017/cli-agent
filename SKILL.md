@@ -12,6 +12,7 @@ description: Route explicit requests from the current coding agent to configured
 - When the user says `让 claude code ...`, `ask claude-code to ...`, `让 claude ...`, or similar, call agent `claude-code`.
 - When the user says `让 codex ...`, `ask codex to ...`, or similar, call agent `codex`.
 - Pass only the child task to the child CLI. For `让 cs say hi`, send `say hi`, not the full routing phrase.
+- Child tasks can run for a very long time. The bridge waits for the child to finish and never times out on its own, so you must wait for it without imposing a timeout. Do **not** set a short tool timeout and do **not** kill or abort the call because it is taking long. Run the bridge in the background (e.g. the Bash/PowerShell tool's `run_in_background`) and wait for it to complete, or set the tool timeout to its maximum. Treat the run as done only when the script returns and prints `output_path` (and `<summary>` on success).
 - By default, let the bridge auto-resume the last saved session for the same agent and workspace.
 - If the user says `新会话`, `不要续聊`, `不接着上次`, or similar, pass `-NewSession`.
 - If the user says `一次性`, `不要保存 session`, `不要作为后续上下文`, or similar, pass `-NoSession`.
@@ -106,7 +107,7 @@ The bridge reads `cli-agents.json` next to this `SKILL.md`.
 Preconfigured agents:
 
 - `cs`: runs `cs run --dir {workspace} --format json {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
-- `csc`: runs `csc -p --permission-mode bypassPermissions --output-format json {prompt}`.
+- `csc`: runs `csc -p --dangerously-skip-permissions --output-format json {prompt}` with `CSC_RAW_DUMP_MODE=0` so background raw-dump workers do not interfere with parent stdout capture.
 - `claude-code`: runs `claude -p --permission-mode bypassPermissions --output-format json {prompt}`.
 - `opencode`: runs `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
 - `codex`: runs `codex --sandbox danger-full-access --ask-for-approval never exec --cd {workspace} --skip-git-repo-check --json` and sends the prompt on stdin.

@@ -58,10 +58,13 @@
       "promptArgs": ["{prompt}"],
       "modelArgs": ["--model", "{model}"],
       "defaultFullAuto": true,
-      "fullAutoArgs": ["--permission-mode", "bypassPermissions"],
+      "fullAutoArgs": ["--dangerously-skip-permissions"],
       "outputMode": "generic-json",
       "progressPrefix": "[csc]",
       "workingDirectory": "{workspace}",
+      "environment": {
+        "CSC_RAW_DUMP_MODE": "0"
+      },
       "sessionIdRegex": "\"(?:sessionID|sessionId|session_id|thread_id)\"\\s*:\\s*\"([^\"]+)\""
     },
     "opencode": {
