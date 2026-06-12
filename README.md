@@ -28,7 +28,7 @@ cli-agent/
 | `cs` | cs | `cs run --dir {workspace} --format json {prompt}` with bundled OpenCode permissions |
 | `csc` | csc | `csc -p --dangerously-skip-permissions --output-format json {prompt}` |
 | `claude`, `claude-code` | claude-code | `claude -p --permission-mode bypassPermissions --output-format json {prompt}` |
-| `opencode` | opencode | `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` |
+| `opencode` | opencode | `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}`; on Windows the bridge resolves `opencode-ai/bin/opencode.exe` to avoid npm shell shim parsing |
 | `codex` | codex | `codex --sandbox danger-full-access --ask-for-approval never exec --json` (prompt via stdin) |
 
 The bundled configuration defaults these agents to full-auto/high-permission mode. For CS/OpenCode, the bridge sets `OPENCODE_CONFIG` and inlines the same file through `OPENCODE_CONFIG_CONTENT` so the runtime permission override comes from `config/opencode-full-permissions.json`. For CSC, the bridge sets `CSC_RAW_DUMP_MODE=0` so background raw-dump workers do not interfere with parent stdout capture.
@@ -93,7 +93,10 @@ Get-Content prompt.txt -Raw -Encoding UTF8 | & ./scripts/ask_cli.ps1 -Agent code
 The bridge forces the child CLI's stdin to UTF-8 (no BOM) and reads `-PromptFile` as UTF-8. For Chinese/emoji prompts:
 
 - **Prefer `-PromptFile`** — caller writes the prompt to a UTF-8 file and passes the path. Avoids every encoding pitfall along the way.
+- **Use `-Task` or `-PromptFile` for long text** — do not paste multi-sentence prompts as unquoted trailing tokens, because PowerShell will split them before the bridge can read them.
 - **Use the PowerShell tool, not the Bash tool**, when invoking from another agent. The Claude Code Bash tool on Windows can transcode stdin through the system code page (GBK) before it reaches PowerShell, corrupting bytes before the bridge ever sees them.
+
+For OpenCode on Windows, the bundled config also resolves the native `opencode.exe` from the npm package when available. This avoids passing long or multi-line prompts through `cmd.exe` and the npm `opencode.ps1` shim.
 
 ### Long-running tasks
 

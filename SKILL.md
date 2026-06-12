@@ -61,7 +61,7 @@ Useful options:
 
 - `-Workspace <path>`: run the child CLI in a target workspace.
 - `-File <path>`: add priority file hints to the prompt; repeat for multiple files.
-- `-PromptFile <path>` (alias `-pf`): read the prompt body from a UTF-8 file instead of passing it as an argument. **Strongly recommended on Windows when the prompt contains non-ASCII text** (Chinese, emoji, etc.) — writing to a UTF-8 file sidesteps stdin/pipeline encoding pitfalls in the Bash tool and other transports.
+- `-PromptFile <path>` (alias `-pf`): read the prompt body from a UTF-8 file instead of passing it as an argument. **Strongly recommended on Windows when the prompt is long or contains non-ASCII text** (Chinese, emoji, etc.) — writing to a UTF-8 file sidesteps stdin/pipeline encoding pitfalls in the Bash tool and other transports.
 - `-Model <name>`: pass a model override when the configured agent supports it.
 - `-Session <id>`: resume when the configured child CLI supports it.
 - `-NewSession`: ignore the saved session and start a fresh one; save the new session if the child CLI returns an id.
@@ -78,6 +78,8 @@ The bridge writes UTF-8 bytes to the child CLI's stdin and accepts UTF-8 prompt 
 # 2. Pass the file path
 & ./scripts/ask_cli.ps1 -Agent codex -PromptFile C:\Temp\prompt.txt
 ```
+
+Use `-Task` or `-PromptFile` for long text; do not paste multi-sentence prompts as unquoted trailing tokens because PowerShell will split them before the bridge can read them.
 
 Avoid invoking `ask_cli.ps1` via the Bash tool when the prompt contains non-ASCII characters — Bash on Windows may transcode stdin through the system code page (GBK) before it reaches PowerShell, corrupting the bytes. Use the PowerShell tool instead.
 
@@ -109,7 +111,7 @@ Preconfigured agents:
 - `cs`: runs `cs run --dir {workspace} --format json {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
 - `csc`: runs `csc -p --dangerously-skip-permissions --output-format json {prompt}` with `CSC_RAW_DUMP_MODE=0` so background raw-dump workers do not interfere with parent stdout capture.
 - `claude-code`: runs `claude -p --permission-mode bypassPermissions --output-format json {prompt}`.
-- `opencode`: runs `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`.
+- `opencode`: runs `opencode run --dir {workspace} --format json --dangerously-skip-permissions {prompt}` with the bundled OpenCode permission config applied through `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`. On Windows, the bridge resolves `opencode-ai/bin/opencode.exe` when available to avoid npm shell shim parsing of long or multi-line prompts.
 - `codex`: runs `codex --sandbox danger-full-access --ask-for-approval never exec --cd {workspace} --skip-git-repo-check --json` and sends the prompt on stdin.
 
 Aliases:

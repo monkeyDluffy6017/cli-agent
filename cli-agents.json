@@ -69,6 +69,8 @@
     },
     "opencode": {
       "command": "opencode",
+      "windowsNativePackage": "opencode-ai",
+      "windowsNativeBinary": "opencode.exe",
       "invocation": "shell",
       "promptMode": "argument",
       "newArgs": ["run", "--dir", "{workspace}", "--format", "json"],

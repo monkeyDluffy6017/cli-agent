@@ -77,6 +77,8 @@ Assert-True ($csAgent.environmentFiles.OPENCODE_CONFIG_CONTENT -eq '{skill_root}
 
 $opencodeAgent = $repoConfig.agents.opencode
 Assert-True ($null -ne $opencodeAgent) 'opencode agent should be configured.'
+Assert-True ($opencodeAgent.windowsNativePackage -eq 'opencode-ai') 'opencode should resolve the Windows native binary instead of passing prompts through the npm shell shim.'
+Assert-True ($opencodeAgent.windowsNativeBinary -eq 'opencode.exe') 'opencode should resolve opencode.exe on Windows.'
 Assert-True ([bool](Get-JsonProperty -Object $opencodeAgent -Name 'defaultFullAuto')) 'opencode should default to full-auto permission mode.'
 Assert-True ($opencodeAgent.environment.OPENCODE_CONFIG -eq '{skill_root}/config/opencode-full-permissions.json') 'opencode should load the bundled OpenCode permission config.'
 Assert-True ($opencodeAgent.environmentFiles.OPENCODE_CONFIG_CONTENT -eq '{skill_root}/config/opencode-full-permissions.json') 'opencode should inline the bundled OpenCode permission config as a runtime override.'
