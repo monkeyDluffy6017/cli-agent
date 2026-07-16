@@ -176,6 +176,19 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
                     CLI_AGENT_CAPTURE = '{output}.capture.json'
                 }
             }
+            'fake-text' = [ordered]@{
+                command = $psExe
+                invocation = 'direct'
+                promptMode = 'argument'
+                newArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fakeAgentPath, 'new')
+                promptArgs = @('{prompt}')
+                outputMode = 'text'
+                progressPrefix = '[fake-text]'
+                workingDirectory = '{workspace}'
+                environment = [ordered]@{
+                    CLI_AGENT_CAPTURE = '{output}.capture.json'
+                }
+            }
         }
     }
     $testConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $testConfigPath -Encoding UTF8
@@ -228,6 +241,20 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
     }
     $beforeCapture = Read-JsonFile "$beforeOutput.capture.json"
     Assert-ArrayContainsSubsequence -Actual $beforeCapture.args -Expected @('--sandbox', 'danger-full-access', '--ask-for-approval', 'never', 'new', 'before task') -Message 'permissionArgsPosition=beforeBase should place permission args before base args.'
+
+    $quietOutput = Join-Path $runtimeDir 'quiet-output.md'
+    $quietBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake-text -Config $testConfigPath -Workspace $workspace -Output $quietOutput -NoSession -NoSummary 'quiet task' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Quiet bridge invocation failed: $quietBridgeOutput"
+    }
+    Assert-True (-not (($quietBridgeOutput | Out-String).Contains('[fake-text]'))) 'Bridge progress should be quiet by default.'
+
+    $progressOutput = Join-Path $runtimeDir 'progress-output.md'
+    $progressBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake-text -Config $testConfigPath -Workspace $workspace -Output $progressOutput -NoSession -NoSummary -ShowProgress 'progress task' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Progress bridge invocation failed: $progressBridgeOutput"
+    }
+    Assert-True (($progressBridgeOutput | Out-String).Contains('[fake-text]')) 'ShowProgress should stream child progress.'
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

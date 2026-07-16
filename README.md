@@ -100,7 +100,9 @@ For OpenCode on Windows, the bundled config also resolves the native `opencode.e
 
 ### Long-running tasks
 
-The bridge has **no timeout** — it waits for the child CLI to finish via a blocking `WaitForExit()` (PowerShell) / foreground `run_child` (bash). Child tasks may run for a long time, so parent agents must wait without imposing a timeout: run the bridge in the background and wait for completion, or set the calling tool's timeout to its maximum. Don't abort or kill the call just because it is slow.
+The bridge has **no timeout** — it waits for the child CLI to finish via a blocking `WaitForExit()` (PowerShell) / foreground `run_child` (bash). Parent agents should prefer one foreground bridge invocation with the longest timeout their host allows. If the host yields an asynchronous handle, use only its wait/join operation; do not poll Git state, processes, output files, or transcripts merely to confirm that the child is still running.
+
+"Still running" is not a state change. Parent agents should report only start, real child-emitted milestones, completion, failure, or a user-requested status. They must not invoke or resume the same child session before the active bridge process exits.
 
 ### Script Output
 
@@ -115,7 +117,7 @@ transcript_path=<file>   # path to normalized JSONL transcript ({ts,type,text})
 </summary>
 ```
 
-The `<summary>` block lets parent CLIs (opencode, codex, etc.) that only capture stdout see the child's final answer without reading any file. Pass `-NoSummary` to suppress it. The JSONL transcript preserves the full child stream for auditing or replay.
+The `<summary>` block lets parent CLIs (opencode, codex, etc.) that only capture stdout see the child's final answer without reading any file. Pass `-NoSummary` to suppress it. The JSONL transcript preserves the full child stream for auditing or replay. Child progress is quiet by default; pass `-ShowProgress` (`--show-progress` in Bash) to stream it while diagnosing a run or when live progress is explicitly wanted.
 
 `transcript_path` is only printed if the JSONL was successfully written — callers must not assume it always appears.
 
@@ -144,6 +146,7 @@ The bridge keeps runtime output files for 3 days by default. On each run it remo
 | `-Config` | `-c` | Path to a custom JSON config |
 | `-Output` | `-o` | Output file path |
 | `-NoSummary` | | Suppress the `<summary>` block on stdout |
+| `-ShowProgress` | | Stream child progress while it runs; quiet by default |
 | `-ReadOnly` | | Read-only sandbox mode |
 | `-FullAuto` | | Full-auto mode for custom configs; enabled by default in the bundled agent config |
 

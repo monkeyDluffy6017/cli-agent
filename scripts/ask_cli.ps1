@@ -50,6 +50,8 @@ param(
 
     [switch]$NoSummary,
 
+    [switch]$ShowProgress,
+
     [switch]$Help,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -113,6 +115,7 @@ Options:
   -FullAuto                    Full-auto mode, if the agent config has fullAutoArgs
   -Output, -o <path>           Output file path
   -NoSummary                   Do not emit the <summary> block on stdout
+  -ShowProgress                Stream child progress while it runs
   -Help                        Show this help
 
 Output (on success):
@@ -947,9 +950,11 @@ try {
         Builder = $stdoutOutput
         Prefix = $progressPrefix
         Mode = $outputMode
+        Show = $ShowProgress.IsPresent
     }
     $stderrData = [pscustomobject]@{
         Builder = $stderrOutput
+        Show = $ShowProgress.IsPresent
     }
 
     $stdOutAction = {
@@ -965,6 +970,8 @@ try {
             } finally {
                 [System.Threading.Monitor]::Exit($data.Builder)
             }
+
+            if (-not $data.Show) { return }
 
             if ($data.Mode -eq 'codex-json' -and $line.StartsWith('{')) {
                 if ($line -match '"item\.started"' -and $line -match '"command_execution"') {
@@ -1014,7 +1021,9 @@ try {
             } finally {
                 [System.Threading.Monitor]::Exit($data.Builder)
             }
-            Write-Host $e.Data -ForegroundColor Yellow
+            if ($data.Show) {
+                Write-Host $e.Data -ForegroundColor Yellow
+            }
         }
     }
 

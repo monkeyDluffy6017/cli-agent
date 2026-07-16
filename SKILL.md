@@ -12,7 +12,11 @@ description: Route explicit requests from the current coding agent to configured
 - When the user says `让 claude code ...`, `ask claude-code to ...`, `让 claude ...`, or similar, call agent `claude-code`.
 - When the user says `让 codex ...`, `ask codex to ...`, or similar, call agent `codex`.
 - Pass only the child task to the child CLI. For `让 cs say hi`, send `say hi`, not the full routing phrase.
-- Child tasks can run for a very long time. The bridge waits for the child to finish and never times out on its own, so you must wait for it without imposing a timeout. Do **not** set a short tool timeout and do **not** kill or abort the call because it is taking long. Run the bridge in the background (e.g. the Bash/PowerShell tool's `run_in_background`) and wait for it to complete, or set the tool timeout to its maximum. Treat the run as done only when the script returns and prints `output_path` (and `<summary>` on success).
+- Child tasks can run for a very long time. Prefer one foreground bridge invocation with the longest timeout the host allows. The bridge waits for the child and has no timeout of its own; do not kill or abort it merely because it is slow.
+- If the host yields an asynchronous run handle, use only its wait/join operation with the longest allowed wait interval. Do not inspect `git status`, processes, output files, or transcripts merely to confirm that the child is still running.
+- Treat "still running" as no state change. Report only the initial start, a real child-emitted milestone, completion, failure, or a user-requested status. If a health check is necessary after 15 minutes without a child event, perform one check and use exponential backoff for later checks.
+- Do not invoke or resume the same child session before its active bridge process exits.
+- Keep child progress quiet by default to avoid adding intermediate output to the parent context. Pass `-ShowProgress` only when the user requests live progress or when diagnosing a failed/stalled run.
 - By default, let the bridge auto-resume the last saved session for the same agent and workspace.
 - If the user says `新会话`, `不要续聊`, `不接着上次`, or similar, pass `-NewSession`.
 - If the user says `一次性`, `不要保存 session`, `不要作为后续上下文`, or similar, pass `-NoSession`.
@@ -55,7 +59,7 @@ Linux/macOS (bash; requires `jq`):
 ./scripts/ask_cli.sh -a codex "say hi" --no-session
 ```
 
-The bash script accepts both POSIX-style flags (`--agent`, `--workspace`, `--prompt-file`, `--new-session`, `--no-session`, `--read-only`, `--full-auto`, `--no-summary`) and the PowerShell-style aliases (`-Agent`, `-Workspace`, `-PromptFile`, `-NewSession`, `-NoSession`, etc.) so that the same invocation patterns work across platforms. Run `chmod +x scripts/ask_cli.sh` on first checkout.
+The bash script accepts both POSIX-style flags (`--agent`, `--workspace`, `--prompt-file`, `--new-session`, `--no-session`, `--read-only`, `--full-auto`, `--no-summary`, `--show-progress`) and the PowerShell-style aliases (`-Agent`, `-Workspace`, `-PromptFile`, `-NewSession`, `-NoSession`, `-ShowProgress`, etc.) so that the same invocation patterns work across platforms. Run `chmod +x scripts/ask_cli.sh` on first checkout.
 
 Useful options:
 
@@ -67,6 +71,7 @@ Useful options:
 - `-NewSession`: ignore the saved session and start a fresh one; save the new session if the child CLI returns an id.
 - `-NoSession`: run without resuming or saving session state.
 - `-FullAuto`: request full-auto permission args for custom configs. The bundled config enables this by default for all preconfigured agents.
+- `-ShowProgress`: stream child progress while it runs. Omit it for the default quiet behavior.
 - `-Config <path>`: use a different JSON config.
 
 ### Passing non-ASCII prompts on Windows

@@ -21,6 +21,7 @@ READ_ONLY=0
 FULL_AUTO=0
 OUTPUT=""
 NO_SUMMARY=0
+SHOW_PROGRESS=0
 
 usage() {
     cat <<'EOF'
@@ -55,6 +56,7 @@ Options:
   --full-auto                 Full-auto mode
   -o, --output <path>         Output file path
   --no-summary                Suppress <summary> block on stdout
+  --show-progress             Stream child progress while it runs
   -h, --help                  Show this help
 EOF
 }
@@ -104,6 +106,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -lt 2 ]] && { echo "[ERROR] Missing value for $1" >&2; exit 1; }
             OUTPUT="$2"; shift 2 ;;
         --no-summary|-NoSummary) NO_SUMMARY=1; shift ;;
+        --show-progress|-ShowProgress) SHOW_PROGRESS=1; shift ;;
         --) shift; while [[ $# -gt 0 ]]; do POSITIONAL+=("$1"); shift; done ;;
         -*) echo "[ERROR] Unrecognized argument: $1" >&2; exit 1 ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -511,12 +514,13 @@ case "$PROMPT_MODE" in
 esac
 
 # ---------- progress filters ----------
-# stdout progress writer: receives raw lines on stdin and prints prefix progress to terminal stderr.
+# stdout progress writer: receives raw lines on stdin and optionally prints progress to terminal stderr.
 # Full raw bytes are captured by tee to TMP_STDOUT_FILE upstream.
 print_stdout_progress() {
-    local mode="$1" prefix="$2"
+    local mode="$1" prefix="$2" show="$3"
     local line preview cmd text
     while IFS= read -r line || [[ -n "$line" ]]; do
+        (( show )) || continue
         case "$mode" in
             codex-json)
                 if [[ "$line" == \{* ]]; then
@@ -555,9 +559,10 @@ print_stdout_progress() {
 }
 
 print_stderr_progress() {
+    local show="$1"
     local line
     while IFS= read -r line || [[ -n "$line" ]]; do
-        printf '%s\n' "$line" >&2
+        (( show )) && printf '%s\n' "$line" >&2
     done
 }
 
@@ -588,10 +593,10 @@ run_child() {
     fi
 }
 
-# Run child capturing stdout/stderr to files while streaming progress.
+# Run child capturing stdout/stderr to files, optionally streaming progress.
 run_child \
-    > >(tee "$TMP_STDOUT_FILE" | print_stdout_progress "$OUTPUT_MODE" "$PROGRESS_PREFIX") \
-    2> >(tee "$TMP_STDERR_FILE" | print_stderr_progress)
+    > >(tee "$TMP_STDOUT_FILE" | print_stdout_progress "$OUTPUT_MODE" "$PROGRESS_PREFIX" "$SHOW_PROGRESS") \
+    2> >(tee "$TMP_STDERR_FILE" | print_stderr_progress "$SHOW_PROGRESS")
 EXIT_CODE=$?
 wait 2>/dev/null
 
