@@ -12,9 +12,11 @@ description: Route explicit requests from the current coding agent to configured
 - When the user says `让 claude code ...`, `ask claude-code to ...`, `让 claude ...`, or similar, call agent `claude-code`.
 - When the user says `让 codex ...`, `ask codex to ...`, or similar, call agent `codex`.
 - Pass only the child task to the child CLI. For `让 cs say hi`, send `say hi`, not the full routing phrase.
-- Child tasks can run for a very long time. Prefer one foreground bridge invocation with the longest timeout the host allows. The bridge waits for the child and has no timeout of its own; do not kill or abort it merely because it is slow.
-- If the host yields an asynchronous run handle, use only its wait/join operation with the longest allowed wait interval. Do not inspect `git status`, processes, output files, or transcripts merely to confirm that the child is still running.
-- Treat "still running" as no state change. Report only the initial start, a real child-emitted milestone, completion, failure, or a user-requested status. If a health check is necessary after 15 minutes without a child event, perform one check and use exponential backoff for later checks.
+- Child tasks can run for a very long time. Use one foreground bridge invocation with the longest suitable timeout. The bridge waits for the child and has no timeout of its own; do not kill or abort it merely because it is slow.
+- When Codex launches the bridge through `functions.exec`, it **must** set an explicit `yield_time_ms` according to the estimated task size. Never voluntarily use less than `300000` ms (5 minutes): use `300000` for a small, bounded task; `600000` for a normal implementation, review, or debugging task; and `900000` or the host maximum for a large, repository-wide, or multi-step task. Also set the nested shell command's timeout long enough for the child task; it must not expire before `yield_time_ms`.
+- If the host yields an asynchronous run handle, keep that exact run and use only its wait/join operation. Every subsequent wait must use the same `yield_time_ms` as the launch or a larger value, and never less than `300000` ms. If the host rejects or caps the requested interval, use the largest interval it supports. Do not fall back to short polling.
+- Treat "still running" as no state change: wait again on the same run handle. Do not invoke or resume a duplicate child session, and do not inspect `git status`, processes, output files, or transcripts merely to confirm that the child is still running.
+- Report only the initial start, a real child-emitted milestone, completion, failure, or a user-requested status. Do not send a progress update merely because a wait window elapsed. If a health check is necessary after 15 minutes without a child event, perform one check and use exponential backoff for later checks.
 - Do not invoke or resume the same child session before its active bridge process exits.
 - Keep child progress quiet by default to avoid adding intermediate output to the parent context. Pass `-ShowProgress` only when the user requests live progress or when diagnosing a failed/stalled run.
 - By default, let the bridge auto-resume the last saved session for the same agent and workspace.
@@ -26,6 +28,29 @@ description: Route explicit requests from the current coding agent to configured
 ## Command
 
 Resolve the script path relative to this skill directory.
+
+When the caller is Codex, apply the waiting policy above to both the launch and every wait. For example, a normal task should be launched with a 10-minute yield window:
+
+```javascript
+// @exec: {"yield_time_ms": 600000}
+const result = await tools.shell_command({
+  command: "& ./scripts/ask_cli.ps1 -Agent codex -PromptFile C:\\Temp\\prompt.txt",
+  workdir: "C:\\path\\to\\workspace",
+  timeout_ms: 3600000
+});
+text(result);
+```
+
+If this returns `Script running with cell ID ...`, wait on that same cell rather than launching another bridge or checking it through the shell:
+
+```javascript
+// @exec: {"yield_time_ms": 600000}
+const result = await tools.wait({
+  cell_id: "<existing-cell-id>",
+  yield_time_ms: 600000
+});
+text(result);
+```
 
 Windows (PowerShell):
 
