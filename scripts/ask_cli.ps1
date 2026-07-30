@@ -883,6 +883,20 @@ $cleanupScript = {
     Remove-Item -Path $promptFile -Force -ErrorAction SilentlyContinue
 }
 
+$mutexKey = $sessionKey -replace '[^A-Za-z0-9_.-]', '_'
+$runMutex = New-Object System.Threading.Mutex($false, "Local\cli-agent-$mutexKey")
+$runMutexAcquired = $false
+try {
+    $runMutexAcquired = $runMutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $runMutexAcquired = $true
+}
+if (-not $runMutexAcquired) {
+    $runMutex.Dispose()
+    Write-Error "[ERROR] Agent '$Agent' is already running in workspace '$Workspace'. Wait for the active bridge invocation instead of starting another session."
+    exit 1
+}
+
 try {
     Write-File-NoBOM -Path $promptFile -Content $prompt
 
@@ -1169,4 +1183,8 @@ try {
     }
 } finally {
     & $cleanupScript
+    if ($runMutexAcquired) {
+        try { $runMutex.ReleaseMutex() } catch {}
+    }
+    $runMutex.Dispose()
 }

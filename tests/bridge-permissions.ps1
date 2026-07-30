@@ -97,13 +97,14 @@ foreach ($pathPattern in @('/**', 'C:/**', 'D:/**', 'E:/**', 'F:/**', 'G:/**')) 
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "cli-agent-permission-test-$([guid]::NewGuid().ToString('N'))"
 $workspace = Join-Path $tempRoot 'workspace'
+$otherWorkspace = Join-Path $tempRoot 'other-workspace'
 $runtimeDir = Join-Path $tempRoot 'runtime'
 $fakeAgentPath = Join-Path $tempRoot 'fake-agent.ps1'
 $fakeAgentCmdPath = Join-Path $tempRoot 'fake-agent.cmd'
 $testConfigPath = Join-Path $tempRoot 'cli-agents-test.json'
 
 try {
-    New-Item -ItemType Directory -Path $workspace, $runtimeDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $workspace, $otherWorkspace, $runtimeDir -Force | Out-Null
     $psExe = (Get-Process -Id $PID).Path
 
     @'
@@ -125,6 +126,10 @@ $capture = [ordered]@{
 }
 
 $capture | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $env:CLI_AGENT_CAPTURE -Encoding UTF8
+if ($CapturedArgs -contains 'blocking task') {
+    Set-Content -LiteralPath $env:CLI_AGENT_READY -Value 'ready' -Encoding ASCII
+    Start-Sleep -Seconds 8
+}
 Write-Output '{"session_id":"fake-session","result":"ok"}'
 '@ | Set-Content -LiteralPath $fakeAgentPath -Encoding UTF8
 
@@ -153,6 +158,7 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
                 workingDirectory = '{workspace}'
                 environment = [ordered]@{
                     CLI_AGENT_CAPTURE = '{output}.capture.json'
+                    CLI_AGENT_READY = '{output}.ready'
                     CLI_AGENT_SKILL_ROOT = '{skill_root}'
                     CLI_AGENT_WORKSPACE = '{workspace}'
                     OPENCODE_CONFIG = '{skill_root}/config/opencode-full-permissions.json'
@@ -241,6 +247,39 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
     }
     $beforeCapture = Read-JsonFile "$beforeOutput.capture.json"
     Assert-ArrayContainsSubsequence -Actual $beforeCapture.args -Expected @('--sandbox', 'danger-full-access', '--ask-for-approval', 'never', 'new', 'before task') -Message 'permissionArgsPosition=beforeBase should place permission args before base args.'
+
+    $blockingOutput = Join-Path $runtimeDir 'blocking-output.md'
+    $blockingReady = "$blockingOutput.ready"
+    $blockingJob = Start-Job -ScriptBlock {
+        param($PowerShellExe, $BridgePath, $ConfigPath, $WorkspacePath, $OutputPath)
+        & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $BridgePath -Agent fake -Config $ConfigPath -Workspace $WorkspacePath -Output $OutputPath -NoSession -NoSummary 'blocking task' 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Blocking bridge invocation exited with code $LASTEXITCODE."
+        }
+    } -ArgumentList $psExe, $bridge, $testConfigPath, $workspace, $blockingOutput
+    try {
+        $readyDeadline = (Get-Date).AddSeconds(10)
+        while (-not (Test-Path $blockingReady -PathType Leaf) -and (Get-Date) -lt $readyDeadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True (Test-Path $blockingReady -PathType Leaf) 'First bridge invocation should reach the child process.'
+
+        $parallelOutput = Join-Path $runtimeDir 'parallel-output.md'
+        $parallelBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $otherWorkspace -Output $parallelOutput -NoSession -NoSummary 'parallel task' 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) "A bridge invocation in a different workspace should run concurrently: $parallelBridgeOutput"
+
+        $duplicateOutput = Join-Path $runtimeDir 'duplicate-output.md'
+        $duplicateBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $duplicateOutput -NoSession -NoSummary 'duplicate task' 2>&1
+        Assert-True ($LASTEXITCODE -ne 0) 'A concurrent bridge invocation for the same agent and workspace should fail.'
+        Assert-True (($duplicateBridgeOutput | Out-String).Contains('already running')) 'Concurrent invocation failure should explain that the bridge is already running.'
+
+        Wait-Job -Job $blockingJob -Timeout 15 | Out-Null
+        Assert-True ($blockingJob.State -eq 'Completed') "First bridge invocation should complete, actual state: $($blockingJob.State)."
+        Receive-Job -Job $blockingJob -ErrorAction Stop | Out-Null
+    } finally {
+        Stop-Job -Job $blockingJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $blockingJob -Force -ErrorAction SilentlyContinue
+    }
 
     $quietOutput = Join-Path $runtimeDir 'quiet-output.md'
     $quietBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake-text -Config $testConfigPath -Workspace $workspace -Output $quietOutput -NoSession -NoSummary 'quiet task' 2>&1

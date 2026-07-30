@@ -100,9 +100,11 @@ For OpenCode on Windows, the bundled config also resolves the native `opencode.e
 
 ### Long-running tasks
 
-The bridge has **no timeout** — it waits for the child CLI to finish via a blocking `WaitForExit()` (PowerShell) / foreground `run_child` (bash). Parent agents should prefer one foreground bridge invocation with the longest timeout their host allows. If the host yields an asynchronous handle, use only its wait/join operation; do not poll Git state, processes, output files, or transcripts merely to confirm that the child is still running.
+The bridge has **no timeout** — it waits for the child CLI to finish via a blocking `WaitForExit()` (PowerShell) / foreground `run_child` (bash). Parent agents should invoke it exactly once in the foreground and await completion. If the host requires a finite yield interval, use the largest supported value for the launch and every wait (`900000` ms when the maximum is unknown), while setting the child-process timeout independently high enough for the task.
 
-"Still running" is not a state change. Parent agents should report only start, real child-emitted milestones, completion, failure, or a user-requested status. They must not invoke or resume the same child session before the active bridge process exits.
+If the host returns an asynchronous run handle, wait silently on that same handle. "Still running" is not a state change: do not poll Git state, processes, output files, or transcripts, and do not relaunch with `-NewSession`. If the handle is lost, report that it cannot be joined instead of starting a replacement.
+
+The bridge rejects a concurrent invocation for the same agent and workspace. Different agents or workspaces can still run in parallel.
 
 ### Script Output
 

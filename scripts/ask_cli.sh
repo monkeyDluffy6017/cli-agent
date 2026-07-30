@@ -301,10 +301,46 @@ fi
 TMP_PROMPT_FILE="$(mktemp -t cli_agent_prompt.XXXXXXXX)"
 TMP_STDOUT_FILE="$(mktemp -t cli_agent_stdout.XXXXXXXX)"
 TMP_STDERR_FILE="$(mktemp -t cli_agent_stderr.XXXXXXXX)"
+RUN_LOCK_ROOT="$RUNTIME_DIR/run-locks"
+RUN_LOCK_DIR="$RUN_LOCK_ROOT/$SESSION_KEY"
+RUN_LOCK_TOKEN="$$-$RUN_GUID"
+RUN_LOCK_ACQUIRED=0
 cleanup() {
     rm -f "$TMP_PROMPT_FILE" "$TMP_STDOUT_FILE" "$TMP_STDERR_FILE"
+    if (( RUN_LOCK_ACQUIRED )) && [[ -f "$RUN_LOCK_DIR/owner" ]] &&
+        [[ "$(sed -n '2p' "$RUN_LOCK_DIR/owner" 2>/dev/null)" == "$RUN_LOCK_TOKEN" ]]; then
+        rm -f "$RUN_LOCK_DIR/owner"
+        rmdir "$RUN_LOCK_DIR" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
+
+mkdir -p "$RUN_LOCK_ROOT"
+for _lock_attempt in 1 2; do
+    if mkdir "$RUN_LOCK_DIR" 2>/dev/null; then
+        RUN_LOCK_ACQUIRED=1
+        printf '%s\n%s\n' "$$" "$RUN_LOCK_TOKEN" > "$RUN_LOCK_DIR/owner"
+        break
+    fi
+
+    _lock_pid="$(sed -n '1p' "$RUN_LOCK_DIR/owner" 2>/dev/null || true)"
+    if [[ "$_lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$_lock_pid" 2>/dev/null; then
+        echo "[ERROR] Agent '$AGENT' is already running in workspace '$WORKSPACE'. Wait for the active bridge invocation instead of starting another session." >&2
+        exit 1
+    fi
+
+    _stale_lock="$RUN_LOCK_DIR.stale.$RUN_LOCK_TOKEN"
+    if mv "$RUN_LOCK_DIR" "$_stale_lock" 2>/dev/null; then
+        rm -f "$_stale_lock/owner"
+        rmdir "$_stale_lock" 2>/dev/null || true
+    fi
+done
+
+if (( !RUN_LOCK_ACQUIRED )); then
+    echo "[ERROR] Agent '$AGENT' is already running in workspace '$WORKSPACE'. Wait for the active bridge invocation instead of starting another session." >&2
+    exit 1
+fi
+
 printf '%s' "$PROMPT" > "$TMP_PROMPT_FILE"
 
 # ---------- template expansion ----------
