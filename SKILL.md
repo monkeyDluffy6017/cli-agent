@@ -18,9 +18,9 @@ description: Route explicit requests from the current coding agent to configured
 - If the host yields an asynchronous run handle, keep that exact handle and use only its wait/join operation. Wait again silently with the largest supported interval. Never launch another bridge, pass `-NewSession`, inspect Git/process/output state, or resume the child merely because a wait interval elapsed.
 - If the run handle is lost, report that the active run can no longer be joined; do not guess that it ended and do not start a replacement.
 - Report only the initial start, a real child-emitted milestone, completion, failure, or a user-requested status. Do not send a progress update merely because a wait window elapsed.
-- The bridge rejects a concurrent invocation for the same agent and workspace. Treat that error as evidence of an active run to join, not as a reason to retry with a new session.
+- The bridge rejects a concurrent invocation for the same agent, workspace, and run key. Treat that error as evidence of an active run to join, not as a reason to retry with a new session. For genuinely independent tasks in one workspace, assign each a stable `-RunKey` instead of sharing the default run key.
 - Keep child progress quiet by default to avoid adding intermediate output to the parent context. Pass `-ShowProgress` only when the user requests live progress or when diagnosing a failed/stalled run.
-- By default, let the bridge auto-resume the last saved session for the same agent and workspace.
+- By default, let the bridge auto-resume the last saved session for the same agent, workspace, and optional run key.
 - If the user says `新会话`, `不要续聊`, `不接着上次`, or similar, pass `-NewSession`.
 - If the user says `一次性`, `不要保存 session`, `不要作为后续上下文`, or similar, pass `-NoSession`.
 - After the script succeeds, first read the `<summary>` block on stdout for the child CLI's response. If you need the full back-and-forth (tool calls, shell commands, intermediate events), read `transcript_path` (normalized JSONL: `{ts,type,text}`). The full markdown response is at `output_path`.
@@ -85,7 +85,7 @@ Linux/macOS (bash; requires `jq`):
 ./scripts/ask_cli.sh -a codex "say hi" --no-session
 ```
 
-The bash script accepts both POSIX-style flags (`--agent`, `--workspace`, `--prompt-file`, `--new-session`, `--no-session`, `--read-only`, `--full-auto`, `--no-summary`, `--show-progress`) and the PowerShell-style aliases (`-Agent`, `-Workspace`, `-PromptFile`, `-NewSession`, `-NoSession`, `-ShowProgress`, etc.) so that the same invocation patterns work across platforms. Run `chmod +x scripts/ask_cli.sh` on first checkout.
+The bash script accepts both POSIX-style flags (`--agent`, `--workspace`, `--prompt-file`, `--run-key`, `--new-session`, `--no-session`, `--read-only`, `--full-auto`, `--no-summary`, `--show-progress`) and the PowerShell-style aliases (`-Agent`, `-Workspace`, `-PromptFile`, `-RunKey`, `-NewSession`, `-NoSession`, `-ShowProgress`, etc.) so that the same invocation patterns work across platforms. Run `chmod +x scripts/ask_cli.sh` on first checkout.
 
 Useful options:
 
@@ -94,6 +94,7 @@ Useful options:
 - `-PromptFile <path>` (alias `-pf`): read the prompt body from a UTF-8 file instead of passing it as an argument. **Strongly recommended on Windows when the prompt is long or contains non-ASCII text** (Chinese, emoji, etc.) — writing to a UTF-8 file sidesteps stdin/pipeline encoding pitfalls in the Bash tool and other transports.
 - `-Model <name>`: pass a model override when the configured agent supports it.
 - `-Session <id>`: resume when the configured child CLI supports it.
+- `-RunKey <key>` (alias `-rk`; Bash: `--run-key`): isolate an independent task's lock and saved session within the same workspace. Reuse the same key for follow-ups to that task.
 - `-NewSession`: ignore the saved session and start a fresh one; save the new session if the child CLI returns an id.
 - `-NoSession`: run without resuming or saving session state.
 - `-FullAuto`: request full-auto permission args for custom configs. The bundled config enables this by default for all preconfigured agents.
@@ -125,7 +126,7 @@ transcript_path=<path>
 </summary>
 ```
 
-`session_id` is printed when the child CLI exposes one. The bridge stores it in `.runtime/sessions.json` and auto-resumes it on later calls for the same agent and workspace.
+`session_id` is printed when the child CLI exposes one. The bridge stores it in `.runtime/sessions.json` and auto-resumes it on later calls for the same agent, workspace, and optional run key.
 
 `transcript_path` points to a normalized JSONL file (one `{ts,type,text}` per child stdout/stderr line) — read it when you need to inspect the full exchange (tool calls, intermediate events) rather than just the final answer. It is **only printed if the file was successfully written** — do not assume it exists. Pass `-NoSummary` to suppress the `<summary>` block on stdout.
 

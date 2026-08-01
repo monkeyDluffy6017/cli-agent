@@ -18,7 +18,7 @@ cli-agent/
 │   ├── ask_cli.ps1    # Windows PowerShell bridge
 │   └── ask_cli.sh     # Linux/macOS bash bridge
 └── .runtime/           # Auto-created: session state and output files
-    └── sessions.json   # Persisted session IDs per agent/workspace
+    └── sessions.json   # Persisted session IDs per agent/workspace/run key
 ```
 
 ## Preconfigured Agents
@@ -71,6 +71,11 @@ The bridge script can also be called directly:
 
 # Attach priority files
 & ./scripts/ask_cli.ps1 -Agent csc "check this" -File src\main.py
+& ./scripts/ask_cli.ps1 -Agent csc "compare these" -File src\main.py -File tests\main.tests.py
+
+# Run independent design tasks concurrently in one workspace
+& ./scripts/ask_cli.ps1 -Agent claude-code "review design A" -Workspace C:\MyProject -RunKey design-a
+& ./scripts/ask_cli.ps1 -Agent claude-code "review design B" -Workspace C:\MyProject -RunKey design-b
 
 # Force a fresh session
 & ./scripts/ask_cli.ps1 -Agent codex "start fresh" -NewSession
@@ -104,7 +109,7 @@ The bridge has **no timeout** — it waits for the child CLI to finish via a blo
 
 If the host returns an asynchronous run handle, wait silently on that same handle. "Still running" is not a state change: do not poll Git state, processes, output files, or transcripts, and do not relaunch with `-NewSession`. If the handle is lost, report that it cannot be joined instead of starting a replacement.
 
-The bridge rejects a concurrent invocation for the same agent and workspace. Different agents or workspaces can still run in parallel.
+By default, the bridge rejects a concurrent invocation for the same agent and workspace. Use a stable `-RunKey` (`--run-key` in Bash) for each independent task in that workspace. Different run keys can execute concurrently and keep separate saved sessions; calls that belong to the same task should reuse the same run key.
 
 ### Script Output
 
@@ -139,8 +144,9 @@ The bridge keeps runtime output files for 3 days by default. On each run it remo
 | `-Task` | `-t` | Task text (also first positional arg, or via pipeline) |
 | `-PromptFile` | `-pf` | Read prompt body from a UTF-8 file (recommended on Windows for non-ASCII prompts) |
 | `-Workspace` | `-w` | Working directory (default: current dir) |
-| `-File` | `-f` | Priority file paths (repeatable) |
+| `-File` | `-f` | Priority file paths (`-File` is repeatable; either form accepts one PowerShell array) |
 | `-Session` | | Resume a specific session ID |
+| `-RunKey` | `-rk` | Stable key that isolates concurrency and saved sessions within one workspace |
 | `-NewSession` | `-Fresh` | Ignore saved session, start fresh |
 | `-NoSession` | `-Stateless` | Run without saving session state |
 | `-Model` | | Model override |
@@ -196,4 +202,4 @@ Placeholders in arg templates are expanded at runtime:
 
 ## Session Persistence
 
-Sessions are stored in `.runtime/sessions.json`, keyed by a hash of `(agent, workspace)`. The bridge auto-resumes the last session for the same agent and workspace unless `-NewSession` or `-NoSession` is specified.
+Sessions are stored in `.runtime/sessions.json`, keyed by a hash of `(agent, workspace, optional run key)`. Without `-RunKey`, the bridge preserves the existing per-agent/workspace behavior and saved-session key. With `-RunKey`, it auto-resumes only the session saved for that run key unless `-NewSession` or `-NoSession` is specified.

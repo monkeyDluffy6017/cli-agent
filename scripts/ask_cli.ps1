@@ -24,9 +24,12 @@ param(
     [string]$Workspace = (Get-Location).Path,
 
     [Alias('f')]
-    [string[]]$File,
+    [string[]]$PriorityFiles,
 
     [string]$Session,
+
+    [Alias('rk')]
+    [string]$RunKey,
 
     [Alias('Fresh')]
     [switch]$NewSession,
@@ -58,20 +61,36 @@ param(
     [string[]]$RemainingArgs
 )
 
-# Allow repeated -File / -f / --file flags (bash-style). PowerShell's named
-# parameter binder rejects "-File a -File b" even for [string[]] params, so we
-# sweep up any extra tokens here and merge them into $File.
+# -File is parsed from the remaining arguments because PowerShell rejects a
+# repeated named array parameter before the script body can run.
+$File = @($PriorityFiles)
 if ($RemainingArgs) {
     $collected = New-Object System.Collections.Generic.List[string]
-    if ($File) { foreach ($f in $File) { $collected.Add([string]$f) | Out-Null } }
+    foreach ($priorityFile in $PriorityFiles) {
+        $collected.Add([string]$priorityFile) | Out-Null
+    }
+    $sawFileFlag = $false
+    $needsFileValue = $false
     for ($i = 0; $i -lt $RemainingArgs.Count; $i++) {
         $tok = [string]$RemainingArgs[$i]
-        if (($tok -eq '-File' -or $tok -eq '-f' -or $tok -eq '--file') -and ($i + 1) -lt $RemainingArgs.Count) {
-            $collected.Add([string]$RemainingArgs[$i + 1]) | Out-Null
-            $i++
+        if ($tok -eq '-File' -or $tok -eq '-f' -or $tok -eq '--file') {
+            if ($needsFileValue) {
+                Write-Error "[ERROR] Missing value for -File"
+                exit 1
+            }
+            $sawFileFlag = $true
+            $needsFileValue = $true
             continue
         }
-        Write-Error "[ERROR] Unrecognized argument: $tok"
+        if (-not $sawFileFlag -or $tok.StartsWith('-')) {
+            Write-Error "[ERROR] Unrecognized argument: $tok"
+            exit 1
+        }
+        $collected.Add($tok) | Out-Null
+        $needsFileValue = $false
+    }
+    if ($needsFileValue) {
+        Write-Error "[ERROR] Missing value for -File"
         exit 1
     }
     $File = $collected.ToArray()
@@ -98,11 +117,12 @@ Agent selection:
   -Config, -c <path>           JSON config path (default: ../cli-agents.json)
 
 File context:
-  -File, -f <paths>            Priority files. Comma-separated (-File a,b) or
-                               repeated flags (-File a -File b) both work.
+  -File <path>                 Priority file; repeat the full flag for multiple files
+  -f <paths>                   Short alias; accepts one PowerShell array value
 
 Multi-turn:
   -Session <id>                Resume a previous session, if the agent config supports it
+  -RunKey, -rk <key>           Isolate concurrency and saved sessions within one workspace
   -NewSession                  Ignore the saved session and start a fresh one
   -NoSession                   Do not resume or save any session for this run
 
@@ -585,11 +605,10 @@ function Get-GenericJsonSummary {
     return $outputContent
 }
 
-function Get-SessionKey {
-    param([string]$Agent, [string]$Workspace)
+function Get-StableHashPrefix {
+    param([string]$Text)
 
-    $normalized = ($Agent + '|' + $Workspace).ToLowerInvariant()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $hash = $sha.ComputeHash($bytes)
@@ -597,14 +616,46 @@ function Get-SessionKey {
         $sha.Dispose()
     }
     $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
-    return "$Agent-$($hex.Substring(0, 16))"
+    return $hex.Substring(0, 16)
+}
+
+function Get-SessionKey {
+    param([string]$Agent, [string]$Workspace, [string]$RunKey)
+
+    $normalized = ($Agent + '|' + $Workspace).ToLowerInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($RunKey)) {
+        $normalized += '|' + $RunKey.ToLowerInvariant()
+    }
+    $hashPrefix = Get-StableHashPrefix -Text $normalized
+    return "$Agent-$hashPrefix"
+}
+
+function Get-SessionStateMutex {
+    param([string]$Path)
+
+    $normalizedPath = [System.IO.Path]::GetFullPath($Path).ToLowerInvariant()
+    $hashPrefix = Get-StableHashPrefix -Text $normalizedPath
+    return New-Object System.Threading.Mutex($false, "Local\cli-agent-session-state-$hashPrefix")
+}
+
+function Enter-Mutex {
+    param([System.Threading.Mutex]$Mutex)
+
+    try {
+        return $Mutex.WaitOne()
+    } catch [System.Threading.AbandonedMutexException] {
+        return $true
+    }
 }
 
 function Get-SavedSessionId {
     param([string]$Path, [string]$Key)
 
     if (-not (Test-Path $Path -PathType Leaf)) { return $null }
+    $stateMutex = Get-SessionStateMutex -Path $Path
+    $stateMutexAcquired = $false
     try {
+        $stateMutexAcquired = Enter-Mutex -Mutex $stateMutex
         $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
         $sessions = Get-PropertyValue -Object $state -Name 'sessions'
         $entry = Get-PropertyValue -Object $sessions -Name $Key
@@ -613,6 +664,11 @@ function Get-SavedSessionId {
         }
     } catch {
         return $null
+    } finally {
+        if ($stateMutexAcquired) {
+            try { $stateMutex.ReleaseMutex() } catch {}
+        }
+        $stateMutex.Dispose()
     }
     return $null
 }
@@ -623,43 +679,58 @@ function Save-SessionId {
         [string]$Key,
         [string]$Agent,
         [string]$Workspace,
+        [string]$RunKey,
         [string]$SessionId
     )
 
     if ([string]::IsNullOrWhiteSpace($SessionId)) { return }
 
-    $sessionsMap = [ordered]@{}
-    if (Test-Path $Path -PathType Leaf) {
-        try {
-            $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
-            $sessions = Get-PropertyValue -Object $state -Name 'sessions'
-            if ($sessions) {
-                foreach ($prop in $sessions.PSObject.Properties) {
-                    $sessionsMap[$prop.Name] = $prop.Value
+    $stateMutex = Get-SessionStateMutex -Path $Path
+    $stateMutexAcquired = $false
+    try {
+        $stateMutexAcquired = Enter-Mutex -Mutex $stateMutex
+        $sessionsMap = [ordered]@{}
+        if (Test-Path $Path -PathType Leaf) {
+            try {
+                $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
+                $sessions = Get-PropertyValue -Object $state -Name 'sessions'
+                if ($sessions) {
+                    foreach ($prop in $sessions.PSObject.Properties) {
+                        $sessionsMap[$prop.Name] = $prop.Value
+                    }
                 }
+            } catch {
+                $sessionsMap = [ordered]@{}
             }
-        } catch {
-            $sessionsMap = [ordered]@{}
         }
-    }
 
-    $sessionsMap[$Key] = [ordered]@{
-        agent = $Agent
-        workspace = $Workspace
-        session_id = $SessionId
-        updated_utc = (Get-Date).ToUniversalTime().ToString('o')
-    }
+        $sessionEntry = [ordered]@{
+            agent = $Agent
+            workspace = $Workspace
+            session_id = $SessionId
+            updated_utc = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RunKey)) {
+            $sessionEntry.run_key = $RunKey
+        }
+        $sessionsMap[$Key] = $sessionEntry
 
-    $stateOut = [ordered]@{
-        version = 1
-        sessions = $sessionsMap
-    }
+        $stateOut = [ordered]@{
+            version = 1
+            sessions = $sessionsMap
+        }
 
-    $dir = Split-Path $Path -Parent
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $dir = Split-Path $Path -Parent
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Write-File-NoBOM -Path $Path -Content ($stateOut | ConvertTo-Json -Depth 8)
+    } finally {
+        if ($stateMutexAcquired) {
+            try { $stateMutex.ReleaseMutex() } catch {}
+        }
+        $stateMutex.Dispose()
     }
-    Write-File-NoBOM -Path $Path -Content ($stateOut | ConvertTo-Json -Depth 8)
 }
 
 if ($Help) {
@@ -736,6 +807,7 @@ if (-not (Test-Path $Workspace -PathType Container)) {
 $Workspace = (Resolve-Path $Workspace).Path
 
 $Task = Trim-Whitespace $Task
+$RunKey = Trim-Whitespace $RunKey
 if ([string]::IsNullOrEmpty($Task)) {
     Write-Error "[ERROR] Request text is empty. Pass a positional arg, -Task, -PromptFile, or pipe text in."
     exit 1
@@ -777,7 +849,7 @@ if ([string]::IsNullOrEmpty($Output)) {
 $transcriptPath = [System.IO.Path]::ChangeExtension($Output, '.jsonl')
 
 $sessionStatePath = Join-Path $runtimeDir 'sessions.json'
-$sessionKey = Get-SessionKey -Agent $Agent -Workspace $Workspace
+$sessionKey = Get-SessionKey -Agent $Agent -Workspace $Workspace -RunKey $RunKey
 $explicitSession = -not [string]::IsNullOrEmpty($Session)
 
 if (-not $explicitSession -and -not $NewSession -and -not $NoSession) {
@@ -893,7 +965,8 @@ try {
 }
 if (-not $runMutexAcquired) {
     $runMutex.Dispose()
-    Write-Error "[ERROR] Agent '$Agent' is already running in workspace '$Workspace'. Wait for the active bridge invocation instead of starting another session."
+    $runScope = if ([string]::IsNullOrWhiteSpace($RunKey)) { "workspace '$Workspace'" } else { "workspace '$Workspace' with run key '$RunKey'" }
+    Write-Error "[ERROR] Agent '$Agent' is already running in $runScope. Wait for the active bridge invocation or use a different -RunKey for an independent task."
     exit 1
 }
 
@@ -1149,7 +1222,7 @@ try {
     }
 
     if (-not $NoSession -and -not [string]::IsNullOrWhiteSpace($threadId)) {
-        Save-SessionId -Path $sessionStatePath -Key $sessionKey -Agent $Agent -Workspace $Workspace -SessionId $threadId
+        Save-SessionId -Path $sessionStatePath -Key $sessionKey -Agent $Agent -Workspace $Workspace -RunKey $RunKey -SessionId $threadId
     }
 
     Ensure-ParentDirectory -Path $Output

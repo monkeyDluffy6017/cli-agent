@@ -12,6 +12,7 @@ CONFIG=""
 WORKSPACE="$(pwd)"
 FILES=()
 SESSION=""
+RUN_KEY=""
 NEW_SESSION=0
 NO_SESSION=0
 MODEL=""
@@ -44,6 +45,7 @@ File context:
 
 Multi-turn:
   --session <id>              Resume a previous session
+  --run-key <key>             Isolate concurrency and saved sessions within one workspace
   --new-session               Ignore saved session and start fresh
   --no-session                Do not resume or save any session
 
@@ -89,6 +91,9 @@ while [[ $# -gt 0 ]]; do
         --session|-Session)
             [[ $# -lt 2 ]] && { echo "[ERROR] Missing value for $1" >&2; exit 1; }
             SESSION="$2"; shift 2 ;;
+        --run-key|-RunKey|-rk)
+            [[ $# -lt 2 ]] && { echo "[ERROR] Missing value for $1" >&2; exit 1; }
+            RUN_KEY="$2"; shift 2 ;;
         --new-session|-NewSession|-Fresh) NEW_SESSION=1; shift ;;
         --no-session|-NoSession|-Stateless) NO_SESSION=1; shift ;;
         --model|-Model)
@@ -193,6 +198,7 @@ WORKSPACE="$(cd "$WORKSPACE" && pwd)"
 
 # Trim + collapse whitespace
 TASK="$(printf '%s' "$TASK" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+RUN_KEY="$(printf '%s' "$RUN_KEY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 if [[ -z "$TASK" ]]; then
     echo "[ERROR] Request text is empty. Pass a positional arg, --task, --prompt-file, or pipe text in." >&2
     exit 1
@@ -281,6 +287,9 @@ sha256_hex() {
 SESSION_STATE_PATH="$RUNTIME_DIR/sessions.json"
 
 key_input="$(printf '%s|%s' "$AGENT" "$WORKSPACE" | tr '[:upper:]' '[:lower:]')"
+if [[ -n "$RUN_KEY" ]]; then
+    key_input+="|$(printf '%s' "$RUN_KEY" | tr '[:upper:]' '[:lower:]')"
+fi
 key_hash="$(printf '%s' "$key_input" | sha256_hex | cut -c1-16)"
 SESSION_KEY="$AGENT-$key_hash"
 
@@ -305,8 +314,15 @@ RUN_LOCK_ROOT="$RUNTIME_DIR/run-locks"
 RUN_LOCK_DIR="$RUN_LOCK_ROOT/$SESSION_KEY"
 RUN_LOCK_TOKEN="$$-$RUN_GUID"
 RUN_LOCK_ACQUIRED=0
+SESSION_STATE_LOCK_DIR="$RUNTIME_DIR/session-state-lock"
+SESSION_STATE_LOCK_ACQUIRED=0
 cleanup() {
     rm -f "$TMP_PROMPT_FILE" "$TMP_STDOUT_FILE" "$TMP_STDERR_FILE"
+    if (( SESSION_STATE_LOCK_ACQUIRED )) && [[ -f "$SESSION_STATE_LOCK_DIR/owner" ]] &&
+        [[ "$(sed -n '2p' "$SESSION_STATE_LOCK_DIR/owner" 2>/dev/null)" == "$RUN_LOCK_TOKEN" ]]; then
+        rm -f "$SESSION_STATE_LOCK_DIR/owner"
+        rmdir "$SESSION_STATE_LOCK_DIR" 2>/dev/null || true
+    fi
     if (( RUN_LOCK_ACQUIRED )) && [[ -f "$RUN_LOCK_DIR/owner" ]] &&
         [[ "$(sed -n '2p' "$RUN_LOCK_DIR/owner" 2>/dev/null)" == "$RUN_LOCK_TOKEN" ]]; then
         rm -f "$RUN_LOCK_DIR/owner"
@@ -325,7 +341,9 @@ for _lock_attempt in 1 2; do
 
     _lock_pid="$(sed -n '1p' "$RUN_LOCK_DIR/owner" 2>/dev/null || true)"
     if [[ "$_lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$_lock_pid" 2>/dev/null; then
-        echo "[ERROR] Agent '$AGENT' is already running in workspace '$WORKSPACE'. Wait for the active bridge invocation instead of starting another session." >&2
+        _run_scope="workspace '$WORKSPACE'"
+        [[ -n "$RUN_KEY" ]] && _run_scope+=" with run key '$RUN_KEY'"
+        echo "[ERROR] Agent '$AGENT' is already running in $_run_scope. Wait for the active bridge invocation or use a different --run-key for an independent task." >&2
         exit 1
     fi
 
@@ -337,7 +355,9 @@ for _lock_attempt in 1 2; do
 done
 
 if (( !RUN_LOCK_ACQUIRED )); then
-    echo "[ERROR] Agent '$AGENT' is already running in workspace '$WORKSPACE'. Wait for the active bridge invocation instead of starting another session." >&2
+    _run_scope="workspace '$WORKSPACE'"
+    [[ -n "$RUN_KEY" ]] && _run_scope+=" with run key '$RUN_KEY'"
+    echo "[ERROR] Agent '$AGENT' is already running in $_run_scope. Wait for the active bridge invocation or use a different --run-key for an independent task." >&2
     exit 1
 fi
 
@@ -819,27 +839,66 @@ case "$OUTPUT_MODE" in
 esac
 
 # ---------- save session ----------
+acquire_session_state_lock() {
+    local attempt lock_pid stale_lock
+    for attempt in {1..200}; do
+        if mkdir "$SESSION_STATE_LOCK_DIR" 2>/dev/null; then
+            SESSION_STATE_LOCK_ACQUIRED=1
+            printf '%s\n%s\n' "$$" "$RUN_LOCK_TOKEN" > "$SESSION_STATE_LOCK_DIR/owner"
+            return 0
+        fi
+
+        lock_pid="$(sed -n '1p' "$SESSION_STATE_LOCK_DIR/owner" 2>/dev/null || true)"
+        if [[ ! "$lock_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$lock_pid" 2>/dev/null; then
+            stale_lock="$SESSION_STATE_LOCK_DIR.stale.$RUN_LOCK_TOKEN"
+            if mv "$SESSION_STATE_LOCK_DIR" "$stale_lock" 2>/dev/null; then
+                rm -f "$stale_lock/owner"
+                rmdir "$stale_lock" 2>/dev/null || true
+                continue
+            fi
+        fi
+        sleep 0.05
+    done
+    echo "[ERROR] Timed out waiting to update session state: $SESSION_STATE_PATH" >&2
+    return 1
+}
+
+release_session_state_lock() {
+    if (( SESSION_STATE_LOCK_ACQUIRED )) && [[ -f "$SESSION_STATE_LOCK_DIR/owner" ]] &&
+        [[ "$(sed -n '2p' "$SESSION_STATE_LOCK_DIR/owner" 2>/dev/null)" == "$RUN_LOCK_TOKEN" ]]; then
+        rm -f "$SESSION_STATE_LOCK_DIR/owner"
+        rmdir "$SESSION_STATE_LOCK_DIR" 2>/dev/null || true
+    fi
+    SESSION_STATE_LOCK_ACQUIRED=0
+}
+
 save_session() {
-    local path="$1" key="$2" agent="$3" workspace="$4" sid="$5"
+    local path="$1" key="$2" agent="$3" workspace="$4" run_key="$5" sid="$6"
     [[ -z "$sid" ]] && return
     local dir
     dir="$(dirname "$path")"
     mkdir -p "$dir"
+    acquire_session_state_lock || return 1
     local ts
     ts="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local temp_path="$path.tmp.$RUN_LOCK_TOKEN"
+    local save_result=0
     if [[ -f "$path" ]]; then
-        jq --arg k "$key" --arg a "$agent" --arg w "$workspace" --arg s "$sid" --arg ts "$ts" \
-            '.version = 1 | .sessions[$k] = {agent:$a, workspace:$w, session_id:$s, updated_utc:$ts}' \
-            "$path" > "$path.tmp" && mv "$path.tmp" "$path"
+        jq --arg k "$key" --arg a "$agent" --arg w "$workspace" --arg r "$run_key" --arg s "$sid" --arg ts "$ts" \
+            '.version = 1 | .sessions[$k] = ({agent:$a, workspace:$w, session_id:$s, updated_utc:$ts} + (if $r == "" then {} else {run_key:$r} end))' \
+            "$path" > "$temp_path" && mv "$temp_path" "$path" || save_result=$?
     else
-        jq -n --arg k "$key" --arg a "$agent" --arg w "$workspace" --arg s "$sid" --arg ts "$ts" \
-            '{version:1, sessions: { ($k): {agent:$a, workspace:$w, session_id:$s, updated_utc:$ts} }}' \
-            > "$path"
+        jq -n --arg k "$key" --arg a "$agent" --arg w "$workspace" --arg r "$run_key" --arg s "$sid" --arg ts "$ts" \
+            '{version:1, sessions: { ($k): ({agent:$a, workspace:$w, session_id:$s, updated_utc:$ts} + (if $r == "" then {} else {run_key:$r} end)) }}' \
+            > "$temp_path" && mv "$temp_path" "$path" || save_result=$?
     fi
+    rm -f "$temp_path"
+    release_session_state_lock
+    return "$save_result"
 }
 
 if (( !NO_SESSION )) && [[ -n "$THREAD_ID" ]]; then
-    save_session "$SESSION_STATE_PATH" "$SESSION_KEY" "$AGENT" "$WORKSPACE" "$THREAD_ID"
+    save_session "$SESSION_STATE_PATH" "$SESSION_KEY" "$AGENT" "$WORKSPACE" "$RUN_KEY" "$THREAD_ID"
 fi
 
 # ---------- write outputs ----------

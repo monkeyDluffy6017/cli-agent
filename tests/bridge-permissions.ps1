@@ -130,7 +130,14 @@ if ($CapturedArgs -contains 'blocking task') {
     Set-Content -LiteralPath $env:CLI_AGENT_READY -Value 'ready' -Encoding ASCII
     Start-Sleep -Seconds 8
 }
-Write-Output '{"session_id":"fake-session","result":"ok"}'
+$sessionId = if ($CapturedArgs[-1] -eq 'seed design a') {
+    'design-a-session'
+} elseif ($CapturedArgs[-1] -eq 'seed design b') {
+    'design-b-session'
+} else {
+    'fake-session'
+}
+Write-Output (@{ session_id = $sessionId; result = 'ok' } | ConvertTo-Json -Compress)
 '@ | Set-Content -LiteralPath $fakeAgentPath -Encoding UTF8
 
     @"
@@ -232,6 +239,27 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
     $inlinePermissionConfig = $newCapture.env.CLI_AGENT_PERMISSION_CONTENT | ConvertFrom-Json
     Assert-True ($inlinePermissionConfig.permission.'*' -eq 'allow') 'environmentFiles should load file content into the configured env var.'
 
+    $priorityFileOne = Join-Path $workspace 'first design.md'
+    $priorityFileTwo = Join-Path $workspace 'second design.md'
+    Set-Content -LiteralPath $priorityFileOne -Value 'first' -Encoding UTF8
+    Set-Content -LiteralPath $priorityFileTwo -Value 'second' -Encoding UTF8
+
+    $repeatedFileOutput = Join-Path $runtimeDir 'repeated-file-output.md'
+    $repeatedFileBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $repeatedFileOutput -NoSession -NoSummary -Task 'repeated file task' -File $priorityFileOne -File $priorityFileTwo 2>&1
+    Assert-True ($LASTEXITCODE -eq 0) "Repeated -File flags should be accepted: $repeatedFileBridgeOutput"
+    $repeatedFileCapture = Read-JsonFile "$repeatedFileOutput.capture.json"
+    $repeatedFilePrompt = [string]$repeatedFileCapture.args[-1]
+    Assert-True ($repeatedFilePrompt.Contains((Resolve-Path $priorityFileOne).Path)) 'Repeated -File flags should include the first priority file in the prompt.'
+    Assert-True ($repeatedFilePrompt.Contains((Resolve-Path $priorityFileTwo).Path)) 'Repeated -File flags should include the second priority file in the prompt.'
+
+    $arrayFileOutput = Join-Path $runtimeDir 'array-file-output.md'
+    $arrayFileBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $arrayFileOutput -NoSession -NoSummary -Task 'array file task' -File $priorityFileOne,$priorityFileTwo 2>&1
+    Assert-True ($LASTEXITCODE -eq 0) "Array-valued -File should remain supported: $arrayFileBridgeOutput"
+    $arrayFileCapture = Read-JsonFile "$arrayFileOutput.capture.json"
+    $arrayFilePrompt = [string]$arrayFileCapture.args[-1]
+    Assert-True ($arrayFilePrompt.Contains((Resolve-Path $priorityFileOne).Path)) 'Array-valued -File should include the first priority file in the prompt.'
+    Assert-True ($arrayFilePrompt.Contains((Resolve-Path $priorityFileTwo).Path)) 'Array-valued -File should include the second priority file in the prompt.'
+
     $resumeOutput = Join-Path $runtimeDir 'resume-output.md'
     $resumeBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $resumeOutput -Session saved-session -NoSummary 'resume task' 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -257,28 +285,80 @@ Write-Output '{"session_id":"fake-session","result":"ok"}'
             throw "Blocking bridge invocation exited with code $LASTEXITCODE."
         }
     } -ArgumentList $psExe, $bridge, $testConfigPath, $workspace, $blockingOutput
+    $runKeyBlockingOutput = Join-Path $runtimeDir 'run-key-blocking-output.md'
+    $runKeyBlockingReady = "$runKeyBlockingOutput.ready"
+    $runKeyBlockingJob = Start-Job -ScriptBlock {
+        param($PowerShellExe, $BridgePath, $ConfigPath, $WorkspacePath, $OutputPath)
+        & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $BridgePath -Agent fake -Config $ConfigPath -Workspace $WorkspacePath -Output $OutputPath -RunKey design-a -NoSession -NoSummary 'blocking task' 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Run-key blocking bridge invocation exited with code $LASTEXITCODE."
+        }
+    } -ArgumentList $psExe, $bridge, $testConfigPath, $workspace, $runKeyBlockingOutput
     try {
         $readyDeadline = (Get-Date).AddSeconds(10)
-        while (-not (Test-Path $blockingReady -PathType Leaf) -and (Get-Date) -lt $readyDeadline) {
+        while ((-not (Test-Path $blockingReady -PathType Leaf) -or -not (Test-Path $runKeyBlockingReady -PathType Leaf)) -and (Get-Date) -lt $readyDeadline) {
             Start-Sleep -Milliseconds 50
         }
         Assert-True (Test-Path $blockingReady -PathType Leaf) 'First bridge invocation should reach the child process.'
+        Assert-True (Test-Path $runKeyBlockingReady -PathType Leaf) 'Run-key bridge invocation should reach the child process concurrently in the same workspace.'
 
         $parallelOutput = Join-Path $runtimeDir 'parallel-output.md'
         $parallelBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $otherWorkspace -Output $parallelOutput -NoSession -NoSummary 'parallel task' 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "A bridge invocation in a different workspace should run concurrently: $parallelBridgeOutput"
 
+        $runKeyParallelOutput = Join-Path $runtimeDir 'run-key-parallel-output.md'
+        $runKeyParallelBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $runKeyParallelOutput -RunKey design-b -NoSession -NoSummary 'parallel design task' 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) "Different run keys should run concurrently in the same workspace: $runKeyParallelBridgeOutput"
+
         $duplicateOutput = Join-Path $runtimeDir 'duplicate-output.md'
-        $duplicateBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $duplicateOutput -NoSession -NoSummary 'duplicate task' 2>&1
-        Assert-True ($LASTEXITCODE -ne 0) 'A concurrent bridge invocation for the same agent and workspace should fail.'
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $duplicateBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $duplicateOutput -NoSession -NoSummary 'duplicate task' 2>&1
+            $duplicateExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        Assert-True ($duplicateExitCode -ne 0) 'A concurrent bridge invocation for the same agent and workspace should fail.'
         Assert-True (($duplicateBridgeOutput | Out-String).Contains('already running')) 'Concurrent invocation failure should explain that the bridge is already running.'
+
+        $runKeyDuplicateOutput = Join-Path $runtimeDir 'run-key-duplicate-output.md'
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $runKeyDuplicateBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $runKeyDuplicateOutput -RunKey design-a -NoSession -NoSummary 'duplicate design task' 2>&1
+            $runKeyDuplicateExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        Assert-True ($runKeyDuplicateExitCode -ne 0) 'Concurrent invocations with the same run key should fail.'
+        Assert-True (($runKeyDuplicateBridgeOutput | Out-String).Contains('already running')) 'Same-run-key failure should explain that the bridge is already running.'
 
         Wait-Job -Job $blockingJob -Timeout 15 | Out-Null
         Assert-True ($blockingJob.State -eq 'Completed') "First bridge invocation should complete, actual state: $($blockingJob.State)."
         Receive-Job -Job $blockingJob -ErrorAction Stop | Out-Null
+        Wait-Job -Job $runKeyBlockingJob -Timeout 15 | Out-Null
+        Assert-True ($runKeyBlockingJob.State -eq 'Completed') "Run-key bridge invocation should complete, actual state: $($runKeyBlockingJob.State)."
+        Receive-Job -Job $runKeyBlockingJob -ErrorAction Stop | Out-Null
     } finally {
         Stop-Job -Job $blockingJob -ErrorAction SilentlyContinue
         Remove-Job -Job $blockingJob -Force -ErrorAction SilentlyContinue
+        Stop-Job -Job $runKeyBlockingJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $runKeyBlockingJob -Force -ErrorAction SilentlyContinue
+    }
+
+    foreach ($design in @('a', 'b')) {
+        $seedOutput = Join-Path $runtimeDir "seed-design-$design-output.md"
+        $seedBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $seedOutput -RunKey "design-$design" -NewSession -NoSummary "seed design $design" 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) "Seeding design $design should succeed: $seedBridgeOutput"
+    }
+
+    foreach ($design in @('a', 'b')) {
+        $followupOutput = Join-Path $runtimeDir "followup-design-$design-output.md"
+        $followupBridgeOutput = & $psExe -NoProfile -ExecutionPolicy Bypass -File $bridge -Agent fake -Config $testConfigPath -Workspace $workspace -Output $followupOutput -RunKey "design-$design" -NoSummary "followup design $design" 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) "Following up design $design should succeed: $followupBridgeOutput"
+        $followupCapture = Read-JsonFile "$followupOutput.capture.json"
+        Assert-ArrayContainsSubsequence -Actual $followupCapture.args -Expected @('resume', "design-$design-session") -Message "Run key design-$design should resume only its own saved session."
     }
 
     $quietOutput = Join-Path $runtimeDir 'quiet-output.md'
